@@ -162,6 +162,23 @@ func (r *Runner) EnqueueEnumerate(m *domain.Module) bool {
 	})
 }
 
+// EnqueueInitUpgrade runs `terraform init -upgrade` (explicit user action —
+// it mutates .terraform.lock.hcl) and emits InitFinished.
+func (r *Runner) EnqueueInitUpgrade(m *domain.Module) bool {
+	tf := tfexec.TF{Bin: m.TFBin, Dir: m.Path}
+	return r.run(m.Path+"#init", m.Path, func(ctx context.Context) {
+		r.Events <- InitStarted{ModulePath: m.Path}
+		res, err := tf.Init(ctx, true)
+		ev := InitFinished{ModulePath: m.Path}
+		if err != nil {
+			ev.Err = err.Error()
+		} else if res.ExitCode != 0 {
+			ev.Err = string(res.Output)
+		}
+		r.Events <- ev
+	})
+}
+
 // EnqueuePlan plans one workspace, persists the RunRecord + plan file + log,
 // and emits PlanFinished. Returns false if already in flight.
 func (r *Runner) EnqueuePlan(w *domain.Workspace) bool {

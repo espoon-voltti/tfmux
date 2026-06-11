@@ -10,10 +10,15 @@ import (
 	"os"
 	"sync"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/japsu/tfmux/internal/config"
 	"github.com/japsu/tfmux/internal/discovery"
 	"github.com/japsu/tfmux/internal/domain"
 	"github.com/japsu/tfmux/internal/gitstatus"
+	"github.com/japsu/tfmux/internal/paths"
+	"github.com/japsu/tfmux/internal/state"
+	"github.com/japsu/tfmux/internal/ui"
 )
 
 var version = "dev" // overridden via -ldflags "-X main.version=..."
@@ -179,7 +184,16 @@ func printJSON(repos []*domain.Repo) error {
 	return enc.Encode(out)
 }
 
-// runTUI is wired up in a later milestone; keep the default command useful.
 func runTUI() error {
-	return errors.New("TUI not implemented yet — try `tfmux ls`")
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	stateDir, err := paths.StateDir()
+	if err != nil {
+		return err
+	}
+	model := ui.NewModel(cfg, state.New(stateDir))
+	_, err = tea.NewProgram(model, tea.WithAltScreen()).Run()
+	return err
 }
