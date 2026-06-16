@@ -34,11 +34,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/japsu/tfmux/internal/domain"
-	"github.com/japsu/tfmux/internal/gitstatus"
-	"github.com/japsu/tfmux/internal/state"
-	"github.com/japsu/tfmux/internal/tfexec"
-	"github.com/japsu/tfmux/internal/tmuxctl"
+	"github.com/espoon-voltti/tfmux/internal/domain"
+	"github.com/espoon-voltti/tfmux/internal/gitstatus"
+	"github.com/espoon-voltti/tfmux/internal/state"
+	"github.com/espoon-voltti/tfmux/internal/tfexec"
+	"github.com/espoon-voltti/tfmux/internal/tmuxctl"
 )
 
 // Kind classifies a task.

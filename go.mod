@@ -1,4 +1,4 @@
-module github.com/japsu/tfmux
+module github.com/espoon-voltti/tfmux
 
 go 1.26.4
 

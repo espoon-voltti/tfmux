@@ -16,13 +16,13 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/japsu/tfmux/internal/config"
-	"github.com/japsu/tfmux/internal/discovery"
-	"github.com/japsu/tfmux/internal/domain"
-	"github.com/japsu/tfmux/internal/gitstatus"
-	"github.com/japsu/tfmux/internal/paths"
-	"github.com/japsu/tfmux/internal/state"
-	"github.com/japsu/tfmux/internal/ui"
+	"github.com/espoon-voltti/tfmux/internal/config"
+	"github.com/espoon-voltti/tfmux/internal/discovery"
+	"github.com/espoon-voltti/tfmux/internal/domain"
+	"github.com/espoon-voltti/tfmux/internal/gitstatus"
+	"github.com/espoon-voltti/tfmux/internal/paths"
+	"github.com/espoon-voltti/tfmux/internal/state"
+	"github.com/espoon-voltti/tfmux/internal/ui"
 )
 
 var version = "dev" // overridden via -ldflags "-X main.version=..."

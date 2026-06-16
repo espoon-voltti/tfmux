@@ -23,13 +23,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/japsu/tfmux/internal/config"
-	"github.com/japsu/tfmux/internal/domain"
-	"github.com/japsu/tfmux/internal/gitstatus"
-	"github.com/japsu/tfmux/internal/runner"
-	"github.com/japsu/tfmux/internal/state"
-	"github.com/japsu/tfmux/internal/tfexec"
-	"github.com/japsu/tfmux/internal/tmuxctl"
+	"github.com/espoon-voltti/tfmux/internal/config"
+	"github.com/espoon-voltti/tfmux/internal/domain"
+	"github.com/espoon-voltti/tfmux/internal/gitstatus"
+	"github.com/espoon-voltti/tfmux/internal/runner"
+	"github.com/espoon-voltti/tfmux/internal/state"
+	"github.com/espoon-voltti/tfmux/internal/tfexec"
+	"github.com/espoon-voltti/tfmux/internal/tmuxctl"
 )
 
 // taskState mirrors an in-flight runner task for display. A task is created

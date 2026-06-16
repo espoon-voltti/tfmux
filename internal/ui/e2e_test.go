@@ -15,9 +15,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
 
-	"github.com/japsu/tfmux/internal/config"
-	"github.com/japsu/tfmux/internal/state"
-	"github.com/japsu/tfmux/internal/tftest"
+	"github.com/espoon-voltti/tfmux/internal/config"
+	"github.com/espoon-voltti/tfmux/internal/state"
+	"github.com/espoon-voltti/tfmux/internal/tftest"
 )
 
 // TestEndToEnd drives the real program loop: discovery of a fixture git repo,

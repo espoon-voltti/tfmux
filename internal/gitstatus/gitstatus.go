@@ -13,7 +13,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/japsu/tfmux/internal/domain"
+	"github.com/espoon-voltti/tfmux/internal/domain"
 )
 
 // Client fetches git status for a repo. Interface so the UI can be tested

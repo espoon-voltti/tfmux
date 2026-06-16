@@ -7,7 +7,7 @@ package runner
 import (
 	tfjson "github.com/hashicorp/terraform-json"
 
-	"github.com/japsu/tfmux/internal/state"
+	"github.com/espoon-voltti/tfmux/internal/state"
 )
 
 // summarize counts resource changes the way terraform's own

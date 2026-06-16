@@ -13,7 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/japsu/tfmux/internal/runner"
+	"github.com/espoon-voltti/tfmux/internal/runner"
 )
 
 // sortedTasks lists in-flight tasks for the pane: running first, then by

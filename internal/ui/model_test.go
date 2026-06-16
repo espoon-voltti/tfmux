@@ -11,11 +11,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/japsu/tfmux/internal/config"
-	"github.com/japsu/tfmux/internal/domain"
-	"github.com/japsu/tfmux/internal/runner"
-	"github.com/japsu/tfmux/internal/state"
-	"github.com/japsu/tfmux/internal/tfexec"
+	"github.com/espoon-voltti/tfmux/internal/config"
+	"github.com/espoon-voltti/tfmux/internal/domain"
+	"github.com/espoon-voltti/tfmux/internal/runner"
+	"github.com/espoon-voltti/tfmux/internal/state"
+	"github.com/espoon-voltti/tfmux/internal/tfexec"
 )
 
 // fixtureModel builds a model with one repo / one module, sized, discovered.

@@ -11,10 +11,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/japsu/tfmux/internal/domain"
-	"github.com/japsu/tfmux/internal/runner"
-	"github.com/japsu/tfmux/internal/state"
-	"github.com/japsu/tfmux/internal/tfexec"
+	"github.com/espoon-voltti/tfmux/internal/domain"
+	"github.com/espoon-voltti/tfmux/internal/runner"
+	"github.com/espoon-voltti/tfmux/internal/state"
+	"github.com/espoon-voltti/tfmux/internal/tfexec"
 )
 
 func lipglossWidth(s string) int { return lipgloss.Width(s) }

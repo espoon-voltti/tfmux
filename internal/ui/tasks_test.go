@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/japsu/tfmux/internal/runner"
-	"github.com/japsu/tfmux/internal/state"
-	"github.com/japsu/tfmux/internal/tmuxctl"
+	"github.com/espoon-voltti/tfmux/internal/runner"
+	"github.com/espoon-voltti/tfmux/internal/state"
+	"github.com/espoon-voltti/tfmux/internal/tmuxctl"
 )
 
 func runningApplyTask(m *Model, key, windowID string) {

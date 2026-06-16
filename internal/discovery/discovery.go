@@ -21,7 +21,7 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclparse"
 
-	"github.com/japsu/tfmux/internal/domain"
+	"github.com/espoon-voltti/tfmux/internal/domain"
 )
 
 // skippedDirs are never descended into while scanning inside a repo.

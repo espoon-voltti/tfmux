@@ -47,7 +47,7 @@ tfmux
 ## Install
 
 ```sh
-go install github.com/japsu/tfmux/cmd/tfmux@latest
+go install github.com/espoon-voltti/tfmux/cmd/tfmux@latest
 brew install tmux   # only needed for applies; everything else works without
 ```
 

@@ -11,7 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/japsu/tfmux/internal/runner"
+	"github.com/espoon-voltti/tfmux/internal/runner"
 )
 
 // writePlanLog seeds a workspace's plan.log on disk.

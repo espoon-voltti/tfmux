@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/japsu/tfmux/internal/tftest"
+	"github.com/espoon-voltti/tfmux/internal/tftest"
 )
 
 func newTF(t *testing.T) (TF, string) {

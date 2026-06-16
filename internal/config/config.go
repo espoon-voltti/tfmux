@@ -15,7 +15,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
-	"github.com/japsu/tfmux/internal/paths"
+	"github.com/espoon-voltti/tfmux/internal/paths"
 )
 
 // RepoConfig holds per-repo overrides, keyed by repo path in the TOML.

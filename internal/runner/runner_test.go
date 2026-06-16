@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/japsu/tfmux/internal/domain"
-	"github.com/japsu/tfmux/internal/state"
-	"github.com/japsu/tfmux/internal/tftest"
+	"github.com/espoon-voltti/tfmux/internal/domain"
+	"github.com/espoon-voltti/tfmux/internal/state"
+	"github.com/espoon-voltti/tfmux/internal/tftest"
 )
 
 type fixture struct {
