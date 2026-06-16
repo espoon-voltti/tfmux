@@ -7,9 +7,7 @@
 package ui
 
 import (
-	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -30,6 +28,15 @@ import (
 	"github.com/japsu/tfmux/internal/tmuxctl"
 )
 
+// taskState mirrors an in-flight runner task for display. A task is created
+// (queued) when the UI enqueues it, flipped to running on the runner's
+// PhaseRunning event, and removed on any terminal event.
+type taskState struct {
+	kind     runner.Kind
+	running  bool   // false: queued waiting for a slot; true: executing
+	windowID string // apply: the tmux window to attach to
+}
+
 type focusArea int
 
 const (
@@ -47,29 +54,29 @@ type Model struct {
 	tmux   *tmuxctl.Ctl
 	tmuxOK bool
 
-	repos   []*domain.Repo
-	ignore  state.Ignore
-	runs    map[string]*state.RunRecord // workspace key -> latest record
-	planFiles    map[string]bool        // workspace key -> plan file on disk
-	planning     map[string]bool        // workspace key -> plan in flight
-	fingerprints map[string]string      // module path -> current git fingerprint
-	applying     map[string]bool        // workspace key -> apply being polled
+	repos        []*domain.Repo
+	ignore       state.Ignore
+	runs         map[string]*state.RunRecord // workspace key -> latest record
+	planFiles    map[string]bool             // workspace key -> plan file on disk
+	tasks        map[string]*taskState       // runner.TaskID -> in-flight task
+	fingerprints map[string]string           // module path -> current git fingerprint
 
 	rows        []row
 	cursor      int
+	top         int // index of the first visible row (scroll offset)
 	collapsed   map[string]bool
 	marked      map[string]bool
 	showIgnored bool
 	discovering bool
 
-	focus      focusArea
-	detail     viewport.Model
-	detailKey  string
-	filter     textinput.Model
-	filterText string
-	spinner    spinner.Model
-	help       help.Model
-	showHelp   bool
+	focus       focusArea
+	detail      viewport.Model
+	detailKey   string
+	filter      textinput.Model
+	filterText  string
+	spinner     spinner.Model
+	help        help.Model
+	showHelp    bool
 	confirmQuit bool
 
 	status string
@@ -82,18 +89,18 @@ func NewModel(cfg *config.Config, store *state.Store) *Model {
 	fi := textinput.New()
 	fi.Placeholder = "filter…"
 	fi.Prompt = "/"
+	tmux := tmuxctl.New(cfg.TmuxSession)
 	return &Model{
 		cfg:          cfg,
 		store:        store,
-		runner:       runner.New(cfg.Parallelism, store),
+		runner:       runner.New(cfg.Parallelism, store, tmux),
 		git:          gitstatus.CLI{},
-		tmux:         tmuxctl.New(cfg.TmuxSession),
+		tmux:         tmux,
 		tmuxOK:       tmuxctl.Available(),
 		runs:         map[string]*state.RunRecord{},
 		planFiles:    map[string]bool{},
-		planning:     map[string]bool{},
+		tasks:        map[string]*taskState{},
 		fingerprints: map[string]string{},
-		applying:     map[string]bool{},
 		collapsed:    map[string]bool{},
 		marked:       map[string]bool{},
 		ignore:       state.Ignore{},
@@ -109,7 +116,7 @@ func (m *Model) Init() tea.Cmd {
 		m.ignore = ig
 	}
 	return tea.Batch(
-		discoverCmd(m.cfg.Roots),
+		discoverCmd(m.cfg.Roots, false),
 		waitForEvent(m.runner.Events),
 		expirePlansCmd(m.store, m.cfg.PlanTTLDuration()),
 		m.spinner.Tick,
@@ -122,6 +129,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.detail.Width = m.width/2 - 2
 		m.detail.Height = m.height - 4
+		m.ensureVisible()
 		return m, nil
 
 	case spinner.TickMsg:
@@ -154,18 +162,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for k, v := range msg.planFiles {
 			m.planFiles[k] = v
 		}
-		// resume polling applies that were in flight when tfmux last exited
-		var cmds []tea.Cmd
-		for k, rec := range msg.runs {
-			if rec.Apply != nil && rec.Apply.ExitCode == nil && !rec.Apply.Aborted && !m.applying[k] {
-				m.applying[k] = true
+		// re-adopt applies that were still running in tmux when tfmux exited
+		for _, rec := range msg.runs {
+			if rec.Apply != nil && rec.Apply.ExitCode == nil && !rec.Apply.Aborted {
+				if m.runner.EnqueueApplyPoll(rec.ModulePath, rec.Workspace, rec.Apply.WindowID) {
+					m.addTask(runner.KindApply, rec.ModulePath+"//"+rec.Workspace)
+				}
 			}
 		}
-		if len(m.applying) > 0 {
-			cmds = append(cmds, applyTick())
-		}
 		m.reflow()
-		return m, tea.Batch(cmds...)
+		return m, nil
 
 	case fingerprintMsg:
 		m.fingerprints[msg.modulePath] = msg.fingerprint
@@ -181,15 +187,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detail.GotoTop()
 		m.focus = focusDetail
 		return m, nil
-
-	case applyLaunchedMsg:
-		return m.updateApplyLaunched(msg)
-
-	case applyTickMsg:
-		return m, m.pollAppliesCmd()
-
-	case applyPollMsg:
-		return m.updateApplyPoll(msg)
 
 	case expiredPlansMsg:
 		if msg.n > 0 {
@@ -231,14 +228,30 @@ func (m *Model) updateDiscovery(msg discoveryMsg) (tea.Model, tea.Cmd) {
 			if m.ignore[repo.Path] || m.ignore[mod.Path] {
 				continue
 			}
-			if m.runner.EnqueueEnumerate(mod) {
-				mod.WorkspaceState = domain.WorkspacesLoading
+			// Prefer the cached enumeration: listing workspaces hits the
+			// backend and is slow/rate-limited. Refresh is explicit (w / R).
+			if cache, ok := m.store.LoadWorkspaces(mod.Path); ok && !msg.force {
+				m.applyWorkspaces(mod, cache.Workspaces)
+				cmds = append(cmds, loadRunsCmd(m.store, mod, cache.Workspaces))
+			} else if m.runner.EnqueueEnumerate(mod) {
+				m.addTask(runner.KindEnumerate, mod.Path)
 			}
 			cmds = append(cmds, fingerprintCmd(mod))
 		}
 	}
 	m.reflow()
 	return m, tea.Batch(cmds...)
+}
+
+// applyWorkspaces sets a module's workspace list (from cache or a fresh
+// enumeration) and marks it ready.
+func (m *Model) applyWorkspaces(mod *domain.Module, names []string) {
+	mod.WorkspaceState = domain.WorkspacesReady
+	mod.WorkspaceErr = ""
+	mod.Workspaces = nil
+	for _, name := range names {
+		mod.Workspaces = append(mod.Workspaces, &domain.Workspace{Module: mod, Name: name})
+	}
 }
 
 func (m *Model) findModule(path string) *domain.Module {
@@ -252,58 +265,157 @@ func (m *Model) findModule(path string) *domain.Module {
 	return nil
 }
 
+// --- task store ---
+
+func (m *Model) addTask(kind runner.Kind, key string) {
+	m.tasks[runner.TaskID(kind, key)] = &taskState{kind: kind}
+}
+
+func (m *Model) task(kind runner.Kind, key string) *taskState {
+	return m.tasks[runner.TaskID(kind, key)]
+}
+
+func (m *Model) hasTask(kind runner.Kind, key string) bool {
+	return m.tasks[runner.TaskID(kind, key)] != nil
+}
+
+func (m *Model) anyTask(kind runner.Kind) bool {
+	for _, ts := range m.tasks {
+		if ts.kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// updateRunnerEvent folds a task lifecycle transition into the model: running
+// flips the task's display state, terminal events remove it and apply the
+// kind-specific result.
 func (m *Model) updateRunnerEvent(ev runner.Event) tea.Cmd {
-	switch ev := ev.(type) {
-	case runner.EnumStarted:
-		if mod := m.findModule(ev.ModulePath); mod != nil {
-			mod.WorkspaceState = domain.WorkspacesLoading
+	id := ev.TaskID()
+	if ev.Phase == runner.PhaseRunning {
+		ts := m.tasks[id]
+		if ts == nil {
+			ts = &taskState{kind: ev.Kind}
+			m.tasks[id] = ts
 		}
-	case runner.EnumFinished:
-		mod := m.findModule(ev.ModulePath)
-		if mod == nil {
-			return nil
-		}
-		if ev.Err != "" {
-			mod.WorkspaceState = domain.WorkspacesError
-			mod.WorkspaceErr = ev.Err
-			m.reflow()
-			return nil
-		}
-		mod.WorkspaceState = domain.WorkspacesReady
-		mod.WorkspaceErr = ""
-		mod.Workspaces = nil
-		for _, name := range ev.Workspaces {
-			mod.Workspaces = append(mod.Workspaces, &domain.Workspace{Module: mod, Name: name})
-		}
-		m.reflow()
-		return loadRunsCmd(m.store, mod, ev.Workspaces)
-	case runner.PlanStarted:
-		m.planning[ev.Key] = true
-	case runner.PlanFinished:
-		delete(m.planning, ev.Key)
-		if ev.Err != "" {
-			m.status = "plan failed: " + firstLine(ev.Err)
-		}
-		if ev.Record != nil {
-			m.runs[ev.Key] = ev.Record
-			m.planFiles[ev.Key] = ev.Record.PlanExitCode == tfexec.PlanChanges
-			if mod := m.findModule(ev.Record.ModulePath); mod != nil {
-				return fingerprintCmd(mod)
-			}
-		}
-	case runner.InitStarted:
+		ts.running = true
+		return m.taskRunning(ev, ts)
+	}
+	delete(m.tasks, id)
+	return m.taskTerminal(ev)
+}
+
+func (m *Model) taskRunning(ev runner.Event, ts *taskState) tea.Cmd {
+	switch ev.Kind {
+	case runner.KindInit:
 		m.status = "init -upgrade running…"
-	case runner.InitFinished:
-		if ev.Err != "" {
-			m.status = "init -upgrade failed: " + firstLine(ev.Err)
-			return nil
-		}
-		m.status = "init -upgrade done"
-		if mod := m.findModule(ev.ModulePath); mod != nil && m.runner.EnqueueEnumerate(mod) {
-			mod.WorkspaceState = domain.WorkspacesLoading
+	case runner.KindApply:
+		if ev.WindowID != "" {
+			ts.windowID = ev.WindowID
+			if rec := m.runs[ev.Key]; rec != nil {
+				rec.Apply = &state.ApplyRecord{Started: time.Now(), WindowID: ev.WindowID}
+				m.status = "apply launched in tmux — press t to attach"
+				return saveRunCmd(m.store, rec)
+			}
 		}
 	}
 	return nil
+}
+
+func (m *Model) taskTerminal(ev runner.Event) tea.Cmd {
+	switch ev.Kind {
+	case runner.KindEnumerate:
+		return m.enumerateDone(ev)
+	case runner.KindInit:
+		return m.initDone(ev)
+	case runner.KindPlan:
+		return m.planDone(ev)
+	case runner.KindApply:
+		return m.applyDone(ev)
+	}
+	return nil
+}
+
+func (m *Model) enumerateDone(ev runner.Event) tea.Cmd {
+	mod := m.findModule(ev.ModulePath)
+	if mod == nil {
+		return nil
+	}
+	switch ev.Phase {
+	case runner.PhaseFailed:
+		mod.WorkspaceState = domain.WorkspacesError
+		mod.WorkspaceErr = ev.Err
+		m.reflow()
+	case runner.PhaseDone:
+		m.applyWorkspaces(mod, ev.Workspaces)
+		m.reflow()
+		return loadRunsCmd(m.store, mod, ev.Workspaces)
+	case runner.PhaseCanceled:
+		m.reflow()
+	}
+	return nil
+}
+
+func (m *Model) initDone(ev runner.Event) tea.Cmd {
+	switch ev.Phase {
+	case runner.PhaseFailed:
+		m.status = "init -upgrade failed: " + firstLine(ev.Err)
+	case runner.PhaseDone:
+		m.status = "init -upgrade done"
+		if mod := m.findModule(ev.ModulePath); mod != nil && m.runner.EnqueueEnumerate(mod) {
+			m.addTask(runner.KindEnumerate, mod.Path)
+		}
+	}
+	return nil
+}
+
+func (m *Model) planDone(ev runner.Event) tea.Cmd {
+	if ev.Phase == runner.PhaseCanceled {
+		return nil
+	}
+	if ev.Err != "" {
+		m.status = "plan failed: " + firstLine(ev.Err)
+	}
+	if ev.Record != nil {
+		m.runs[ev.Key] = ev.Record
+		m.planFiles[ev.Key] = ev.Record.PlanExitCode == tfexec.PlanChanges
+		if mod := m.findModule(ev.Record.ModulePath); mod != nil {
+			return fingerprintCmd(mod)
+		}
+	}
+	return nil
+}
+
+func (m *Model) applyDone(ev runner.Event) tea.Cmd {
+	switch ev.Phase {
+	case runner.PhaseFailed:
+		m.status = firstLine(ev.Err)
+		return nil
+	case runner.PhaseCanceled:
+		m.status = "apply canceled before launch"
+		return nil
+	}
+	rec := m.runs[ev.Key]
+	if rec == nil || rec.Apply == nil {
+		return nil
+	}
+	now := time.Now()
+	rec.Apply.Finished = &now
+	switch {
+	case ev.Aborted:
+		rec.Apply.Aborted = true
+		m.status = "apply window closed without finishing — state unknown, re-plan"
+	case ev.ApplyExit != nil:
+		rec.Apply.ExitCode = ev.ApplyExit
+		if *ev.ApplyExit == 0 {
+			m.planFiles[ev.Key] = false
+			m.status = fmt.Sprintf("applied %s//%s ✓", rec.ModulePath, rec.Workspace)
+			return tea.Batch(saveRunCmd(m.store, rec), discardPlanCmd(m.store, rec.ModulePath, rec.Workspace))
+		}
+		m.status = fmt.Sprintf("apply failed (exit %d) — press t to inspect the tmux window", *ev.ApplyExit)
+	}
+	return saveRunCmd(m.store, rec)
 }
 
 // --- keyboard handling ---
@@ -351,7 +463,7 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case key.Matches(msg, keys.Quit):
-		if len(m.planning) > 0 {
+		if m.anyTask(runner.KindPlan) {
 			m.confirmQuit = true
 			return m, nil
 		}
@@ -366,10 +478,16 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
+		m.ensureVisible()
 	case key.Matches(msg, keys.Down):
 		if m.cursor < len(m.rows)-1 {
 			m.cursor++
 		}
+		m.ensureVisible()
+	case key.Matches(msg, keys.PageUp):
+		m.pageUp()
+	case key.Matches(msg, keys.PageDown):
+		m.pageDown()
 	case key.Matches(msg, keys.Left):
 		if r, ok := m.currentRow(); ok && r.kind != rowWorkspace {
 			m.collapsed[r.nodeKey()] = true
@@ -391,6 +509,7 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.cursor < len(m.rows)-1 {
 				m.cursor++
 			}
+			m.ensureVisible()
 		}
 	case key.Matches(msg, keys.Filter):
 		m.focus = focusFilter
@@ -403,8 +522,17 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Cancel):
 		m.cancelCurrent()
 	case key.Matches(msg, keys.View):
-		if r, ok := m.currentRow(); ok && r.kind == rowWorkspace {
-			return m, loadPlanLogCmd(m.store, r.mod.Path, r.ws.Name)
+		if r, ok := m.currentRow(); ok {
+			switch {
+			case r.kind == rowWorkspace:
+				return m, loadPlanLogCmd(m.store, r.mod.Path, r.ws.Name)
+			case r.kind == rowModule && r.mod.WorkspaceState == domain.WorkspacesError:
+				m.detailKey = r.mod.Path
+				m.detail.SetContent(colorizePlanLog(r.mod.WorkspaceErr))
+				m.detail.GotoTop()
+				m.focus = focusDetail
+				return m, nil
+			}
 		}
 	case key.Matches(msg, keys.Discard):
 		if r, ok := m.currentRow(); ok && r.kind == rowWorkspace {
@@ -419,14 +547,16 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showIgnored = !m.showIgnored
 		m.reflow()
 	case key.Matches(msg, keys.InitUpgrade):
-		if r, ok := m.currentRow(); ok && r.mod != nil {
-			m.runner.EnqueueInitUpgrade(r.mod)
+		if r, ok := m.currentRow(); ok && r.mod != nil && m.runner.EnqueueInitUpgrade(r.mod) {
+			m.addTask(runner.KindInit, r.mod.Path)
 		}
 	case key.Matches(msg, keys.Refresh):
 		return m, m.refresh()
+	case key.Matches(msg, keys.RefreshWorkspaces):
+		m.refreshWorkspaces()
 	case key.Matches(msg, keys.Rediscover):
 		m.discovering = true
-		return m, discoverCmd(m.cfg.Roots)
+		return m, discoverCmd(m.cfg.Roots, true)
 	case key.Matches(msg, keys.Apply):
 		return m, m.applyCurrent()
 	case key.Matches(msg, keys.Attach):
@@ -449,6 +579,101 @@ func (m *Model) reflow() {
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
+	}
+	m.ensureVisible()
+}
+
+// visibleHeight is the number of tree rows on screen, matching the bodyHeight
+// the View hands to renderTree.
+func (m *Model) visibleHeight() int {
+	h := m.height - 3
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
+// ensureVisible scrolls the window minimally so the cursor stays on screen.
+// Because the scroll offset is stored (not derived from the cursor), moving up
+// from the bottom of the list walks the cursor up the screen rather than
+// scrolling the whole list.
+func (m *Model) ensureVisible() {
+	h := m.visibleHeight()
+	if m.cursor < m.top {
+		m.top = m.cursor
+	}
+	if m.cursor >= m.top+h {
+		m.top = m.cursor - h + 1
+	}
+	if maxTop := len(m.rows) - h; m.top > maxTop {
+		m.top = maxTop
+	}
+	if m.top < 0 {
+		m.top = 0
+	}
+}
+
+// pageDown moves first to the bottom of the visible screen, then a screenful
+// at a time (keeping one row of context overlap).
+func (m *Model) pageDown() {
+	h := m.visibleHeight()
+	bottom := m.top + h - 1
+	if last := len(m.rows) - 1; bottom > last {
+		bottom = last
+	}
+	if m.cursor < bottom {
+		m.cursor = bottom
+	} else {
+		m.cursor += h - 1
+		if last := len(m.rows) - 1; m.cursor > last {
+			m.cursor = last
+		}
+	}
+	m.ensureVisible()
+}
+
+// pageUp mirrors pageDown: first to the top of the screen, then a screenful up.
+func (m *Model) pageUp() {
+	h := m.visibleHeight()
+	if m.cursor > m.top {
+		m.cursor = m.top
+	} else {
+		m.cursor -= h - 1
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+	}
+	m.ensureVisible()
+}
+
+// refreshWorkspaces re-enumerates workspaces for the module(s) under the cursor,
+// overwriting the on-disk cache once each enumeration completes.
+func (m *Model) refreshWorkspaces() {
+	r, ok := m.currentRow()
+	if !ok {
+		return
+	}
+	var mods []*domain.Module
+	switch r.kind {
+	case rowRepo:
+		for _, mod := range r.repo.Modules {
+			if !m.ignore[mod.Path] {
+				mods = append(mods, mod)
+			}
+		}
+	case rowModule, rowWorkspace:
+		mods = append(mods, r.mod)
+	}
+	n := 0
+	for _, mod := range mods {
+		if m.runner.EnqueueEnumerate(mod) {
+			m.addTask(runner.KindEnumerate, mod.Path)
+			n++
+		}
+	}
+	if n > 0 {
+		m.status = fmt.Sprintf("re-enumerating workspaces for %d module(s)…", n)
+		m.reflow()
 	}
 }
 
@@ -480,7 +705,7 @@ func (m *Model) enqueuePlans(targets []*domain.Workspace) tea.Cmd {
 			continue
 		}
 		if m.runner.EnqueuePlan(ws) {
-			m.planning[ws.Key()] = true
+			m.addTask(runner.KindPlan, ws.Key())
 			n++
 		}
 	}
@@ -527,13 +752,32 @@ func (m *Model) cancelCurrent() {
 	if !ok {
 		return
 	}
+	var keys []string
 	switch r.kind {
 	case rowWorkspace:
-		m.runner.Cancel(r.ws.Key())
+		keys = append(keys, r.ws.Key())
 	case rowModule:
-		m.runner.Cancel(r.mod.Path)
+		keys = append(keys, r.mod.Path) // enumeration / init, if any
 		for _, ws := range r.mod.Workspaces {
-			m.runner.Cancel(ws.Key())
+			keys = append(keys, ws.Key())
+		}
+	}
+	for _, k := range keys {
+		m.runner.Cancel(k)
+		m.forgetTasks(k)
+	}
+}
+
+// forgetTasks optimistically drops a key's in-flight tasks so the UI reacts to
+// a cancel immediately (the runner's Canceled event is then a no-op). A running
+// apply is kept — it lives on in tmux and is left attached.
+func (m *Model) forgetTasks(key string) {
+	for _, kind := range []runner.Kind{runner.KindEnumerate, runner.KindInit, runner.KindPlan, runner.KindApply} {
+		if ts := m.task(kind, key); ts != nil {
+			if kind == runner.KindApply && ts.running {
+				continue
+			}
+			delete(m.tasks, runner.TaskID(kind, key))
 		}
 	}
 }
@@ -553,13 +797,13 @@ func (m *Model) toggleIgnore() tea.Cmd {
 	// re-enable: a module that was never enumerated needs it now
 	if wasIgnored && r.kind == rowModule && r.mod.WorkspaceState == domain.WorkspacesUnknown {
 		if m.runner.EnqueueEnumerate(r.mod) {
-			r.mod.WorkspaceState = domain.WorkspacesLoading
+			m.addTask(runner.KindEnumerate, r.mod.Path)
 		}
 	}
 	if wasIgnored && r.kind == rowRepo {
 		for _, mod := range r.repo.Modules {
 			if !m.ignore[mod.Path] && mod.WorkspaceState == domain.WorkspacesUnknown && m.runner.EnqueueEnumerate(mod) {
-				mod.WorkspaceState = domain.WorkspacesLoading
+				m.addTask(runner.KindEnumerate, mod.Path)
 			}
 		}
 	}
@@ -605,7 +849,7 @@ func (m *Model) applyCurrent() tea.Cmd {
 	key := r.ws.Key()
 	rec := m.runs[key]
 	switch {
-	case m.planning[key]:
+	case m.hasTask(runner.KindPlan, key):
 		m.status = "plan still running"
 		return nil
 	case rec == nil || rec.PlanExitCode != tfexec.PlanChanges:
@@ -614,138 +858,20 @@ func (m *Model) applyCurrent() tea.Cmd {
 	case !m.planFiles[key]:
 		m.status = "plan file expired or discarded — re-plan first"
 		return nil
-	case rec.Apply != nil && rec.Apply.ExitCode == nil && !rec.Apply.Aborted:
-		m.status = "apply already running — press t to attach"
+	case m.hasTask(runner.KindApply, key):
+		m.status = "apply already queued/running — press t to attach"
 		return nil
 	case m.isStale(rec):
 		m.status = "plan is STALE (module changed since plan) — re-plan, or attach and apply manually"
 		return nil
 	}
-	mod := r.mod
-	ws := r.ws.Name
-	tmux := m.tmux
-	store := m.store
-	bin := mod.TFBin
-	plannedVersion := rec.TFBinVersion
-	return func() tea.Msg {
-		// version guard: plan files aren't portable across binary versions
-		if plannedVersion != "" {
-			cur, err := (tfexec.TF{Bin: bin, Dir: mod.Path}).Version(context.Background())
-			if err == nil && cur != plannedVersion {
-				return statusMsg{text: fmt.Sprintf(
-					"refusing to apply: plan made with %s %s, current is %s — re-plan",
-					bin, plannedVersion, cur)}
-			}
-		}
-		planFile, err := store.PlanFilePath(mod.Path, ws)
-		if err != nil {
-			return applyLaunchedMsg{key: key, err: err}
-		}
-		exitFile, err := store.ApplyExitPath(mod.Path, ws)
-		if err != nil {
-			return applyLaunchedMsg{key: key, err: err}
-		}
-		windowID, err := tmux.LaunchApply(tmuxctl.ApplySpec{
-			ModuleDir: mod.Path,
-			Workspace: ws,
-			TFBin:     bin,
-			PlanFile:  planFile,
-			ExitFile:  exitFile,
-			Name:      mod.Repo.Name + "/" + ws,
-		})
-		return applyLaunchedMsg{key: key, windowID: windowID, err: err}
+	// The runner launches the tmux window, guards the binary version, and
+	// watches the apply to completion while holding a pool slot.
+	if m.runner.EnqueueApply(r.ws, rec.TFBinVersion) {
+		m.addTask(runner.KindApply, key)
+		m.status = "apply queued"
 	}
-}
-
-func (m *Model) updateApplyLaunched(msg applyLaunchedMsg) (tea.Model, tea.Cmd) {
-	if msg.err != nil {
-		m.status = "apply launch failed: " + msg.err.Error()
-		return m, nil
-	}
-	rec := m.runs[msg.key]
-	if rec == nil {
-		return m, nil
-	}
-	rec.Apply = &state.ApplyRecord{Started: time.Now(), WindowID: msg.windowID}
-	m.applying[msg.key] = true
-	m.status = "apply launched in tmux — press t to attach"
-	return m, tea.Batch(saveRunCmd(m.store, rec), applyTick())
-}
-
-// pollAppliesCmd stats exit files and cross-checks live windows.
-func (m *Model) pollAppliesCmd() tea.Cmd {
-	if len(m.applying) == 0 {
-		return nil
-	}
-	type target struct {
-		key, modulePath, ws, windowID string
-	}
-	var targets []target
-	for k := range m.applying {
-		rec := m.runs[k]
-		if rec == nil || rec.Apply == nil {
-			continue
-		}
-		targets = append(targets, target{key: k, modulePath: rec.ModulePath, ws: rec.Workspace, windowID: rec.Apply.WindowID})
-	}
-	store := m.store
-	tmux := m.tmux
-	return func() tea.Msg {
-		windows, werr := tmux.ListWindowIDs()
-		var msg applyPollMsg
-		msg.err = werr
-		for _, t := range targets {
-			exitFile, err := store.ApplyExitPath(t.modulePath, t.ws)
-			if err != nil {
-				continue
-			}
-			data, err := os.ReadFile(exitFile)
-			if err == nil {
-				var code int
-				fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &code)
-				msg.results = append(msg.results, applyPollResult{key: t.key, exitCode: &code})
-				continue
-			}
-			if werr == nil && t.windowID != "" && !windows[t.windowID] {
-				msg.results = append(msg.results, applyPollResult{key: t.key, vanished: true})
-			}
-		}
-		return msg
-	}
-}
-
-func (m *Model) updateApplyPoll(msg applyPollMsg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-	for _, res := range msg.results {
-		rec := m.runs[res.key]
-		if rec == nil || rec.Apply == nil {
-			delete(m.applying, res.key)
-			continue
-		}
-		now := time.Now()
-		switch {
-		case res.exitCode != nil:
-			rec.Apply.ExitCode = res.exitCode
-			rec.Apply.Finished = &now
-			if *res.exitCode == 0 {
-				m.planFiles[res.key] = false
-				m.status = fmt.Sprintf("applied %s//%s ✓", rec.ModulePath, rec.Workspace)
-				cmds = append(cmds, discardPlanCmd(m.store, rec.ModulePath, rec.Workspace))
-			} else {
-				m.status = fmt.Sprintf("apply failed (exit %d) — press t to inspect the tmux window", *res.exitCode)
-			}
-		case res.vanished:
-			rec.Apply.Aborted = true
-			rec.Apply.Finished = &now
-			m.status = "apply window closed without finishing — state unknown, re-plan"
-		}
-		delete(m.applying, res.key)
-		cmds = append(cmds, saveRunCmd(m.store, rec))
-	}
-	if len(m.applying) > 0 {
-		cmds = append(cmds, applyTick())
-	}
-	return m, tea.Batch(cmds...)
+	return nil
 }
 
 func (m *Model) attach() tea.Cmd {
@@ -778,11 +904,23 @@ func (m *Model) View() string {
 	if m.discovering {
 		meta = append(meta, m.spinner.View()+" discovering")
 	}
-	if n := len(m.planning); n > 0 {
-		meta = append(meta, fmt.Sprintf("%s %d planning", m.spinner.View(), n))
+	var running, queued int
+	for _, ts := range m.tasks {
+		if ts.running {
+			running++
+		} else {
+			queued++
+		}
 	}
-	if n := len(m.applying); n > 0 {
-		meta = append(meta, fmt.Sprintf("%d applying", n))
+	if running+queued > 0 {
+		var parts []string
+		if running > 0 {
+			parts = append(parts, fmt.Sprintf("%d running", running))
+		}
+		if queued > 0 {
+			parts = append(parts, fmt.Sprintf("%d queued", queued))
+		}
+		meta = append(meta, m.spinner.View()+" "+strings.Join(parts, ", "))
 	}
 	if !m.tmuxOK {
 		meta = append(meta, styleError.Render("tmux: unavailable"))
@@ -843,9 +981,12 @@ func (m *Model) renderTree(height int) string {
 	if m.focus == focusDetail {
 		treeWidth = m.width / 2
 	}
-	start := 0
-	if m.cursor >= height {
-		start = m.cursor - height + 1
+	start := m.top
+	if maxStart := len(m.rows) - height; start > maxStart {
+		start = maxStart
+	}
+	if start < 0 {
+		start = 0
 	}
 	end := start + height
 	if end > len(m.rows) {

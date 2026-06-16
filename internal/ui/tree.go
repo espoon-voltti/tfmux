@@ -5,8 +5,10 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/japsu/tfmux/internal/domain"
+	"github.com/japsu/tfmux/internal/runner"
 	"github.com/japsu/tfmux/internal/state"
 	"github.com/japsu/tfmux/internal/tfexec"
 )
@@ -104,25 +106,56 @@ func matchesFilter(filter string, repo *domain.Repo, mod *domain.Module, ws *dom
 // renderRow renders one line of the tree at the given width.
 func (m *Model) renderRow(r row, selected bool, width int) string {
 	var line string
-	switch r.kind {
-	case rowRepo:
-		line = m.renderRepoRow(r.repo)
-	case rowModule:
-		line = m.renderModuleRow(r.mod)
-	case rowWorkspace:
-		line = m.renderWorkspaceRow(r.ws)
-	}
 	if m.ignore[r.nodeKey()] {
-		line += styleDim.Render("  (ignored)")
+		// Ignored items are only visible under Z; render them uniformly muted
+		// (single style over plain text) so they read as inactive at a glance.
+		line = m.renderIgnoredRow(r)
+	} else {
+		switch r.kind {
+		case rowRepo:
+			line = m.renderRepoRow(r.repo)
+		case rowModule:
+			line = m.renderModuleRow(r.mod)
+		case rowWorkspace:
+			line = m.renderWorkspaceRow(r.ws)
+		}
 	}
 	if selected {
-		pad := width - lipglossWidth(line)
-		if pad > 0 {
-			line += strings.Repeat(" ", pad)
+		// Render the selection as a solid bar: strip the per-segment styling
+		// and re-color the whole row in the cursor style. Nested ANSI resets
+		// would otherwise punch holes in the background, and a dim ignored
+		// foreground would vanish against it.
+		plain := ansi.Strip(line)
+		if pad := width - lipglossWidth(plain); pad > 0 {
+			plain += strings.Repeat(" ", pad)
 		}
-		return styleCursor.Render(line)
+		return styleCursor.Render(plain)
 	}
 	return line
+}
+
+// renderIgnoredRow renders an explicitly-ignored node as a single muted,
+// plain-text line — keeping the tree indentation but dropping the status cell,
+// which is irrelevant for items the user has chosen to skip.
+func (m *Model) renderIgnoredRow(r row) string {
+	var label string
+	switch r.kind {
+	case rowRepo:
+		marker := "▾"
+		if m.collapsed[r.repo.Path] {
+			marker = "▸"
+		}
+		label = fmt.Sprintf("%s %s", marker, r.repo.Name)
+	case rowModule:
+		marker := "▾"
+		if m.collapsed[r.mod.Path] {
+			marker = "▸"
+		}
+		label = fmt.Sprintf("  %s %s", marker, r.mod.RelPath)
+	case rowWorkspace:
+		label = fmt.Sprintf("      %s", r.ws.Name)
+	}
+	return styleIgnored.Render(label + "  (ignored)")
 }
 
 func (m *Model) renderRepoRow(repo *domain.Repo) string {
@@ -158,15 +191,27 @@ func (m *Model) renderModuleRow(mod *domain.Module) string {
 		marker = "▸"
 	}
 	s := fmt.Sprintf("  %s %s  ", marker, styleModule.Render(mod.RelPath))
-	switch mod.WorkspaceState {
-	case domain.WorkspacesUnknown:
+	switch {
+	case m.task(runner.KindInit, mod.Path) != nil:
+		s += m.taskBadge(m.task(runner.KindInit, mod.Path), "init -upgrade", "init queued")
+	case m.task(runner.KindEnumerate, mod.Path) != nil:
+		s += m.taskBadge(m.task(runner.KindEnumerate, mod.Path), "listing workspaces", "workspaces queued")
+	case mod.WorkspaceState == domain.WorkspacesUnknown:
 		s += styleDim.Render("…")
-	case domain.WorkspacesLoading:
-		s += styleRunning.Render(m.spinner.View() + " loading workspaces")
-	case domain.WorkspacesError:
+	case mod.WorkspaceState == domain.WorkspacesError:
 		s += styleError.Render("✗ " + firstLine(mod.WorkspaceErr))
 	}
 	return s
+}
+
+// taskBadge renders an in-flight task's status cell: an animated spinner with
+// runningLabel while executing, or a static dim marker with queuedLabel while
+// it waits for a worker slot.
+func (m *Model) taskBadge(ts *taskState, runningLabel, queuedLabel string) string {
+	if ts.running {
+		return styleRunning.Render(m.spinner.View() + " " + runningLabel)
+	}
+	return styleDim.Render("◌ " + queuedLabel)
 }
 
 func (m *Model) renderWorkspaceRow(ws *domain.Workspace) string {
@@ -184,15 +229,15 @@ func (m *Model) renderWorkspaceRow(ws *domain.Workspace) string {
 // outstanding changes (the must-stand-out case), clean, error, apply state.
 func (m *Model) renderWorkspaceStatus(ws *domain.Workspace) string {
 	key := ws.Key()
-	if m.planning[key] {
-		return styleRunning.Render(m.spinner.View() + " planning")
+	if ts := m.task(runner.KindPlan, key); ts != nil {
+		return m.taskBadge(ts, "planning", "plan queued")
+	}
+	if ts := m.task(runner.KindApply, key); ts != nil {
+		return m.taskBadge(ts, "applying (tmux)", "apply queued")
 	}
 	rec := m.runs[key]
 	if rec == nil {
 		return styleDim.Render("never planned")
-	}
-	if rec.Apply != nil && rec.Apply.ExitCode == nil && !rec.Apply.Aborted {
-		return styleRunning.Render(m.spinner.View() + " applying (tmux)")
 	}
 	var parts []string
 	switch rec.PlanExitCode {

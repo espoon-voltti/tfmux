@@ -26,7 +26,7 @@ func newFixture(t *testing.T, parallelism int) *fixture {
 	t.Setenv("TFMUX_FAKE_LOG", logFile)
 	store := state.New(t.TempDir())
 	return &fixture{
-		runner:  New(parallelism, store),
+		runner:  New(parallelism, store, nil),
 		store:   store,
 		logFile: logFile,
 		bin:     bin,
@@ -46,20 +46,29 @@ func (f *fixture) newModule(t *testing.T, name string) *domain.Module {
 	return m
 }
 
-// drain collects events until want of type T arrived or timeout.
-func drainUntil[T any](t *testing.T, ch chan Event, want int) []T {
+// waitFor returns the first event satisfying pred, or fails on timeout.
+func waitFor(t *testing.T, ch chan Event, pred func(Event) bool) Event {
 	t.Helper()
-	var got []T
 	timeout := time.After(30 * time.Second)
-	for len(got) < want {
+	for {
 		select {
 		case ev := <-ch:
-			if v, ok := ev.(T); ok {
-				got = append(got, v)
+			if pred(ev) {
+				return ev
 			}
 		case <-timeout:
-			t.Fatalf("timed out waiting for %d events, got %d", want, len(got))
+			t.Fatal("timed out waiting for event")
 		}
+	}
+}
+
+// waitTerminal collects want terminal events of the given kind.
+func waitTerminal(t *testing.T, ch chan Event, kind Kind, want int) []Event {
+	t.Helper()
+	var got []Event
+	for len(got) < want {
+		ev := waitFor(t, ch, func(e Event) bool { return e.Kind == kind && e.Phase.Terminal() })
+		got = append(got, ev)
 	}
 	return got
 }
@@ -70,12 +79,15 @@ func TestEnumerateEmitsWorkspaces(t *testing.T) {
 	if !f.runner.EnqueueEnumerate(m) {
 		t.Fatal("enqueue refused")
 	}
-	evs := drainUntil[EnumFinished](t, f.runner.Events, 1)
-	if evs[0].Err != "" {
-		t.Fatal(evs[0].Err)
+	ev := waitTerminal(t, f.runner.Events, KindEnumerate, 1)[0]
+	if ev.Phase != PhaseDone {
+		t.Fatalf("phase = %v, err = %q", ev.Phase, ev.Err)
 	}
-	if strings.Join(evs[0].Workspaces, ",") != "default,prod,staging" {
-		t.Errorf("workspaces = %v", evs[0].Workspaces)
+	if strings.Join(ev.Workspaces, ",") != "default,prod,staging" {
+		t.Errorf("workspaces = %v", ev.Workspaces)
+	}
+	if cache, ok := f.store.LoadWorkspaces(m.Path); !ok || len(cache.Workspaces) != 3 {
+		t.Errorf("enumeration not cached: %+v ok=%v", cache, ok)
 	}
 }
 
@@ -89,7 +101,7 @@ func TestEnqueueDedup(t *testing.T) {
 	if f.runner.EnqueueEnumerate(m) {
 		t.Error("duplicate enqueue accepted")
 	}
-	drainUntil[EnumFinished](t, f.runner.Events, 1)
+	waitTerminal(t, f.runner.Events, KindEnumerate, 1)
 }
 
 func TestPlanPersistsRecordAndPlanFile(t *testing.T) {
@@ -111,11 +123,11 @@ func TestPlanPersistsRecordAndPlanFile(t *testing.T) {
 	if !f.runner.EnqueuePlan(ws) {
 		t.Fatal("enqueue refused")
 	}
-	evs := drainUntil[PlanFinished](t, f.runner.Events, 1)
-	if evs[0].Err != "" {
-		t.Fatal(evs[0].Err)
+	ev := waitTerminal(t, f.runner.Events, KindPlan, 1)[0]
+	if ev.Phase != PhaseDone {
+		t.Fatalf("phase = %v, err = %q", ev.Phase, ev.Err)
 	}
-	rec := evs[0].Record
+	rec := ev.Record
 	if rec.PlanExitCode != 2 {
 		t.Errorf("exit = %d", rec.PlanExitCode)
 	}
@@ -148,9 +160,9 @@ func TestCleanPlanDiscardsPlanFile(t *testing.T) {
 	m := f.newModule(t, "mod1")
 	ws := &domain.Workspace{Module: m, Name: "default"}
 	f.runner.EnqueuePlan(ws)
-	evs := drainUntil[PlanFinished](t, f.runner.Events, 1)
-	if evs[0].Record.PlanExitCode != 0 {
-		t.Fatalf("exit = %d", evs[0].Record.PlanExitCode)
+	ev := waitTerminal(t, f.runner.Events, KindPlan, 1)[0]
+	if ev.Record.PlanExitCode != 0 {
+		t.Fatalf("exit = %d", ev.Record.PlanExitCode)
 	}
 	if f.store.HasPlanFile(m.Path, "default") {
 		t.Error("clean plan should not leave a plan file")
@@ -169,13 +181,13 @@ func TestSameModuleSerializedCrossModuleParallel(t *testing.T) {
 	f.runner.EnqueuePlan(&domain.Workspace{Module: m1, Name: "prod"})
 	f.runner.EnqueuePlan(&domain.Workspace{Module: m1, Name: "staging"})
 	f.runner.EnqueuePlan(&domain.Workspace{Module: m2, Name: "prod"})
-	drainUntil[PlanFinished](t, f.runner.Events, 3)
+	waitTerminal(t, f.runner.Events, KindPlan, 3)
 
 	data, err := os.ReadFile(f.logFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	open := map[string]int{}        // module dir -> currently running plans
+	open := map[string]int{} // module dir -> currently running plans
 	sawCrossModuleOverlap := false
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		fields := strings.Fields(line)
@@ -201,4 +213,65 @@ func TestSameModuleSerializedCrossModuleParallel(t *testing.T) {
 	if !sawCrossModuleOverlap {
 		t.Error("expected cross-module plans to overlap with parallelism 4")
 	}
+}
+
+// With one slot, a high-priority plan jumps ahead of a queued low-priority
+// enumeration once the slot frees.
+func TestPriorityPlanBeatsEnumerate(t *testing.T) {
+	f := newFixture(t, 1)
+	t.Setenv("TFMUX_FAKE_SLEEP", "1")
+	blocker := f.newModule(t, "blocker")
+	low := f.newModule(t, "low")
+	high := f.newModule(t, "high")
+
+	f.runner.EnqueueEnumerate(blocker) // fills the only slot
+	waitFor(t, f.runner.Events, func(e Event) bool {
+		return e.Phase == PhaseRunning && e.Kind == KindEnumerate && e.Key == blocker.Path
+	})
+	// both queue behind the blocker; plan must start first
+	f.runner.EnqueueEnumerate(low)
+	planWS := &domain.Workspace{Module: high, Name: "prod"}
+	f.runner.EnqueuePlan(planWS)
+
+	planID := TaskID(KindPlan, planWS.Key())
+	lowID := TaskID(KindEnumerate, low.Path)
+	var order []string
+	for len(order) < 2 {
+		ev := waitFor(t, f.runner.Events, func(e Event) bool {
+			return e.Phase == PhaseRunning && (e.TaskID() == planID || e.TaskID() == lowID)
+		})
+		order = append(order, ev.TaskID())
+	}
+	if order[0] != planID {
+		t.Errorf("expected plan to run before low-priority enumeration, got %v", order)
+	}
+	// low runs last (one slot), so its terminal means everything has finished
+	waitFor(t, f.runner.Events, func(e Event) bool { return e.TaskID() == lowID && e.Phase.Terminal() })
+}
+
+// A task canceled while still queued emits Canceled and never runs.
+func TestCancelQueuedEmitsCanceled(t *testing.T) {
+	f := newFixture(t, 1)
+	t.Setenv("TFMUX_FAKE_SLEEP", "1")
+	blocker := f.newModule(t, "blocker")
+	victim := f.newModule(t, "victim")
+
+	f.runner.EnqueueEnumerate(blocker)
+	waitFor(t, f.runner.Events, func(e Event) bool {
+		return e.Phase == PhaseRunning && e.Key == blocker.Path
+	})
+	ws := &domain.Workspace{Module: victim, Name: "prod"}
+	f.runner.EnqueuePlan(ws)
+	f.runner.Cancel(ws.Key())
+
+	ev := waitFor(t, f.runner.Events, func(e Event) bool {
+		return e.Kind == KindPlan && e.Key == ws.Key()
+	})
+	if ev.Phase != PhaseCanceled {
+		t.Errorf("first plan event = %v, want Canceled (it should never have run)", ev.Phase)
+	}
+	// let the blocker finish before TempDir cleanup
+	waitFor(t, f.runner.Events, func(e Event) bool {
+		return e.Key == blocker.Path && e.Phase.Terminal()
+	})
 }

@@ -31,7 +31,26 @@ func fixtureModel(t *testing.T) (*Model, *domain.Module) {
 
 func enumerated(t *testing.T, m *Model, mod *domain.Module, names ...string) {
 	t.Helper()
-	m.updateRunnerEvent(runner.EnumFinished{ModulePath: mod.Path, Workspaces: names})
+	m.updateRunnerEvent(runner.Event{
+		Kind: runner.KindEnumerate, Key: mod.Path, ModulePath: mod.Path,
+		Phase: runner.PhaseDone, Workspaces: names,
+	})
+}
+
+// planTask marks a plan task in flight (queued or running), as the runner's
+// events would.
+func planTask(m *Model, key string, running bool) {
+	m.tasks[runner.TaskID(runner.KindPlan, key)] = &taskState{kind: runner.KindPlan, running: running}
+}
+
+func countTasks(m *Model, kind runner.Kind) int {
+	n := 0
+	for _, ts := range m.tasks {
+		if ts.kind == kind {
+			n++
+		}
+	}
+	return n
 }
 
 func keyPress(m *Model, k string) tea.Cmd {
@@ -62,7 +81,10 @@ func TestEnumFinishedPopulatesWorkspaces(t *testing.T) {
 
 func TestEnumErrorShownOnModule(t *testing.T) {
 	m, mod := fixtureModel(t)
-	m.updateRunnerEvent(runner.EnumFinished{ModulePath: mod.Path, Err: "Error: no credentials"})
+	m.updateRunnerEvent(runner.Event{
+		Kind: runner.KindEnumerate, Key: mod.Path, ModulePath: mod.Path,
+		Phase: runner.PhaseFailed, Err: "Error: no credentials",
+	})
 	if mod.WorkspaceState != domain.WorkspacesError {
 		t.Fatalf("state = %v", mod.WorkspaceState)
 	}
@@ -80,7 +102,7 @@ func drainPlanFinished(t *testing.T, m *Model, n int) {
 	for n > 0 {
 		select {
 		case ev := <-m.runner.Events:
-			if _, ok := ev.(runner.PlanFinished); ok {
+			if ev.Kind == runner.KindPlan && ev.Phase.Terminal() {
 				n--
 			}
 		case <-timeout:
@@ -95,7 +117,7 @@ func TestPlanKeyQueuesCursorWorkspace(t *testing.T) {
 	m.cursor = 2 // workspace row
 	keyPress(m, "p")
 	key := mod.Path + "//prod"
-	if !m.planning[key] {
+	if !m.hasTask(runner.KindPlan, key) {
 		t.Error("plan not queued for cursor workspace")
 	}
 	drainPlanFinished(t, m, 1)
@@ -106,8 +128,8 @@ func TestPlanKeyOnRepoQueuesAllWorkspaces(t *testing.T) {
 	enumerated(t, m, mod, "default", "prod")
 	m.cursor = 0 // repo row
 	keyPress(m, "p")
-	if len(m.planning) != 2 {
-		t.Errorf("planning = %v", m.planning)
+	if n := countTasks(m, runner.KindPlan); n != 2 {
+		t.Errorf("plan tasks = %d, want 2", n)
 	}
 	drainPlanFinished(t, m, 2)
 }
@@ -116,15 +138,18 @@ func TestPlanFinishedUpdatesStatusAndBadge(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")
 	key := mod.Path + "//prod"
-	m.planning[key] = true
+	planTask(m, key, true)
 	rec := &state.RunRecord{
 		ModulePath: mod.Path, Workspace: "prod",
 		PlanFinished: time.Now(), PlanExitCode: tfexec.PlanChanges,
 		Summary: state.ChangeSummary{Add: 2, Change: 1},
 	}
-	m.updateRunnerEvent(runner.PlanFinished{Key: key, Record: rec})
-	if m.planning[key] {
-		t.Error("planning flag not cleared")
+	m.updateRunnerEvent(runner.Event{
+		Kind: runner.KindPlan, Key: key, ModulePath: mod.Path,
+		Phase: runner.PhaseDone, Record: rec,
+	})
+	if m.hasTask(runner.KindPlan, key) {
+		t.Error("plan task not cleared")
 	}
 	if !m.planFiles[key] {
 		t.Error("plan file flag not set for changes")
@@ -213,7 +238,7 @@ func TestApplyGuards(t *testing.T) {
 	}
 }
 
-func TestApplyPollSuccessDiscardsPlan(t *testing.T) {
+func TestApplyDoneSuccessDiscardsPlan(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")
 	key := mod.Path + "//prod"
@@ -223,9 +248,12 @@ func TestApplyPollSuccessDiscardsPlan(t *testing.T) {
 		Apply:        &state.ApplyRecord{Started: time.Now(), WindowID: "@1"},
 	}
 	m.planFiles[key] = true
-	m.applying[key] = true
+	m.tasks[runner.TaskID(runner.KindApply, key)] = &taskState{kind: runner.KindApply, running: true}
 	zero := 0
-	m.updateApplyPoll(applyPollMsg{results: []applyPollResult{{key: key, exitCode: &zero}}})
+	m.updateRunnerEvent(runner.Event{
+		Kind: runner.KindApply, Key: key, ModulePath: mod.Path,
+		Phase: runner.PhaseDone, ApplyExit: &zero,
+	})
 	rec := m.runs[key]
 	if rec.Apply.ExitCode == nil || *rec.Apply.ExitCode != 0 || rec.Apply.Finished == nil {
 		t.Errorf("apply record: %+v", rec.Apply)
@@ -233,12 +261,12 @@ func TestApplyPollSuccessDiscardsPlan(t *testing.T) {
 	if m.planFiles[key] {
 		t.Error("plan file flag should clear after successful apply")
 	}
-	if len(m.applying) != 0 {
-		t.Error("applying set not cleared")
+	if m.hasTask(runner.KindApply, key) {
+		t.Error("apply task not cleared")
 	}
 }
 
-func TestApplyPollVanishedWindow(t *testing.T) {
+func TestApplyDoneVanishedWindow(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")
 	key := mod.Path + "//prod"
@@ -247,8 +275,11 @@ func TestApplyPollVanishedWindow(t *testing.T) {
 		PlanExitCode: tfexec.PlanChanges,
 		Apply:        &state.ApplyRecord{Started: time.Now(), WindowID: "@1"},
 	}
-	m.applying[key] = true
-	m.updateApplyPoll(applyPollMsg{results: []applyPollResult{{key: key, vanished: true}}})
+	m.tasks[runner.TaskID(runner.KindApply, key)] = &taskState{kind: runner.KindApply, running: true}
+	m.updateRunnerEvent(runner.Event{
+		Kind: runner.KindApply, Key: key, ModulePath: mod.Path,
+		Phase: runner.PhaseDone, Aborted: true,
+	})
 	if !m.runs[key].Apply.Aborted {
 		t.Error("vanished window should mark apply aborted")
 	}
@@ -257,7 +288,7 @@ func TestApplyPollVanishedWindow(t *testing.T) {
 func TestQuitConfirmWhilePlanning(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")
-	m.planning[mod.Path+"//prod"] = true
+	planTask(m, mod.Path+"//prod", true)
 	keyPress(m, "q")
 	if !m.confirmQuit {
 		t.Fatal("expected quit confirmation")

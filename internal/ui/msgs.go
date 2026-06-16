@@ -16,6 +16,7 @@ import (
 
 type discoveryMsg struct {
 	repos []*domain.Repo
+	force bool // re-enumerate workspaces even if a cache exists
 	err   error
 }
 
@@ -46,33 +47,16 @@ type planLogMsg struct {
 	err     error
 }
 
-type applyLaunchedMsg struct {
-	key      string
-	windowID string
-	err      error
-}
-
-type applyPollResult struct {
-	key      string
-	exitCode *int // nil: still running
-	vanished bool // window gone without exit file
-}
-
-type applyPollMsg struct {
-	results []applyPollResult
-	err     error
-}
-
 type expiredPlansMsg struct{ n int }
 
 type savedMsg struct{ err error }
 
 type statusMsg struct{ text string }
 
-func discoverCmd(roots []string) tea.Cmd {
+func discoverCmd(roots []string, force bool) tea.Cmd {
 	return func() tea.Msg {
 		repos, err := discovery.Discover(roots)
-		return discoveryMsg{repos: repos, err: err}
+		return discoveryMsg{repos: repos, force: force, err: err}
 	}
 }
 
@@ -155,9 +139,3 @@ func expirePlansCmd(store *state.Store, ttl time.Duration) tea.Cmd {
 		return expiredPlansMsg{n: n}
 	}
 }
-
-func applyTick() tea.Cmd {
-	return tea.Tick(time.Second, func(time.Time) tea.Msg { return applyTickMsg{} })
-}
-
-type applyTickMsg struct{}

@@ -58,6 +58,7 @@ Run `tfmux` for the TUI, or `tfmux ls [--json]` for a scriptable dump.
 | Key | Action |
 |---|---|
 | `↑/↓` `j/k` | move |
+| `PgUp/PgDn` `C-u/C-d` | jump to top/bottom of screen, then page |
 | `←/→` `h/l` | collapse / expand |
 | `space` | mark workspace for bulk plan |
 | `p` / `P` | plan marked-or-cursor / plan all visible |
@@ -69,20 +70,36 @@ Run `tfmux` for the TUI, or `tfmux ls [--json]` for a scriptable dump.
 | `i` / `Z` | toggle ignore / show ignored |
 | `I` | `terraform init -upgrade` for the module |
 | `r` / `R` | refresh statuses / re-discover repos |
+| `w` | re-enumerate workspaces under the cursor (refreshes the cache) |
 | `/` | filter |
 | `?` | help, `q` quit |
 
 ## How it works (and why)
 
-- **Plans are headless, applies are tmux.** Plans are read-only and
-  parallel-friendly; applies are interactive, long-running and must not die
-  with the UI — so each apply gets a tmux window that outlives tfmux. A
-  wrapper writes the exit code to a file atomically; tfmux polls it (1s)
-  and cleans up the plan file on success.
+- **Everything is a task on one scheduler.** Workspace enumeration, init,
+  plan, and apply are all tasks with the same lifecycle (queued → running →
+  done) sharing a single worker pool capped at `parallelism`. The status cell
+  distinguishes a spinning *running* task from a dim *queued* one waiting for a
+  slot, and the header tallies both.
+- **Prioritized queue.** When more work is ready than there are slots, the
+  scheduler prefers applies over plans, and plans over enumerations — so a
+  plan-all doesn't make you wait on background workspace discovery, and an
+  apply you asked for jumps the queue.
+- **Plans are headless, applies are tmux.** Plans are read-only; applies are
+  interactive, long-running and must not die with the UI — so each apply runs
+  in a tmux window that outlives tfmux (a wrapper writes the exit code to a
+  file atomically). The apply still holds a pool slot and is watched to
+  completion; an apply left running when tfmux exits is re-adopted on restart.
+  Canceling (`x`) a *queued* apply drops it before launch; a *running* apply is
+  left attached in tmux.
 - **`TF_WORKSPACE`, never `workspace select`** — selecting would mutate
   `.terraform/environment` shared with your shell and other jobs.
+- **Workspace lists are cached.** Enumerating workspaces hits the backend
+  (S3/DynamoDB, etc.) and is slow and easily rate-limited, so the list is
+  persisted per module and reused on the next launch. Re-enumerate explicitly
+  with `w` (cursor) or `R` (everything) when workspaces change.
 - **Per-module serialization.** Any command can lazily turn into a
-  `terraform init` (mutates `.terraform/`), so two jobs never run in the
+  `terraform init` (mutates `.terraform/`), so two tasks never run in the
   same module dir concurrently; cross-module parallelism provides the speed.
 - **Init is lazy and never `-upgrade`** (that rewrites the lock file —
   explicit `I` only). All commands run `-input=false` so missing credentials

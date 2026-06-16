@@ -7,6 +7,7 @@
 //	├── ignore.json
 //	└── modules/<sha256(absModulePath)[:16]>/
 //	    ├── module.json              back-reference for debugging/GC
+//	    ├── workspaces.json          cached workspace enumeration
 //	    └── ws/<workspaceName>/
 //	        ├── run.json             RunRecord
 //	        ├── plan.tfplan          0600 — plan files embed secrets
@@ -169,6 +170,49 @@ func (s *Store) LoadRun(modulePath, workspace string) (*RunRecord, error) {
 		return nil, fmt.Errorf("corrupt run.json for %s//%s: %w", modulePath, workspace, err)
 	}
 	return &r, nil
+}
+
+// WorkspaceCache is the persisted result of a workspace enumeration. Listing
+// workspaces hits the backend (e.g. S3/DynamoDB) and is slow and rate-limited,
+// so we cache it and re-enumerate only on explicit user refresh.
+type WorkspaceCache struct {
+	Workspaces   []string  `json:"workspaces"`
+	EnumeratedAt time.Time `json:"enumerated_at"`
+}
+
+func (s *Store) workspacesPath(modulePath string) string {
+	return filepath.Join(s.Dir, "modules", moduleHash(modulePath), "workspaces.json")
+}
+
+// SaveWorkspaces caches a module's enumerated workspace list (0600, atomic).
+func (s *Store) SaveWorkspaces(modulePath string, names []string, at time.Time) error {
+	dir, err := s.ModuleDir(modulePath)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(WorkspaceCache{Workspaces: names, EnumeratedAt: at}, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := filepath.Join(dir, "workspaces.json.tmp")
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(dir, "workspaces.json"))
+}
+
+// LoadWorkspaces returns the cached workspace list, or (nil, false) when no
+// cache exists.
+func (s *Store) LoadWorkspaces(modulePath string) (*WorkspaceCache, bool) {
+	data, err := os.ReadFile(s.workspacesPath(modulePath))
+	if err != nil {
+		return nil, false
+	}
+	var c WorkspaceCache
+	if json.Unmarshal(data, &c) != nil {
+		return nil, false
+	}
+	return &c, true
 }
 
 // HasPlanFile reports whether a saved (non-expired, non-discarded) plan file

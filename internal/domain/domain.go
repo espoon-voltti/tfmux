@@ -6,14 +6,14 @@ package domain
 // GitStatus is a snapshot of a repo's working tree, from
 // `git status --porcelain=v2 --branch`.
 type GitStatus struct {
-	Branch   string // empty when detached
-	OID      string // HEAD commit, "(initial)" before first commit
-	Detached bool
-	Dirty    bool // any staged, unstaged or untracked entries
-	Ahead    int
-	Behind   int
+	Branch      string // empty when detached
+	OID         string // HEAD commit, "(initial)" before first commit
+	Detached    bool
+	Dirty       bool // any staged, unstaged or untracked entries
+	Ahead       int
+	Behind      int
 	HasUpstream bool
-	Err      error // git invocation/parse failure; other fields zero
+	Err         error // git invocation/parse failure; other fields zero
 }
 
 // Repo is a git repository discovered under one of the configured roots.
@@ -24,12 +24,12 @@ type Repo struct {
 	Modules []*Module
 }
 
-// WorkspaceState describes how far enumeration has progressed for a module.
+// WorkspaceState is a module's last enumeration outcome. In-progress
+// enumeration (queued/running) is tracked as a task, not here.
 type WorkspaceState int
 
 const (
 	WorkspacesUnknown WorkspaceState = iota // not yet enumerated
-	WorkspacesLoading
 	WorkspacesReady
 	WorkspacesError
 )
