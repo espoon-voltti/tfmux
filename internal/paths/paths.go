@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 City of Espoo
+//
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
 // Package paths resolves tfmux's config and state directories following the
 // XDG base directory spec, with ~/.config and ~/.local/state fallbacks on
 // every platform (including darwin, where Application Support is wrong for a

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 City of Espoo
+//
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
 // Package state persists tfmux's machine-owned state under the XDG state
 // dir: run records, saved plan files, and the ignore list.
 //

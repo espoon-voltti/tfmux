@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 City of Espoo
+//
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
 // Package tftest provides a fake terraform binary (a shell script) for
 // testing tfexec and runner without real cloud credentials.
 package tftest

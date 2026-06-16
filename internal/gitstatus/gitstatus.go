@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 City of Espoo
+//
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
 // Package gitstatus reads a repo's branch/dirty/ahead-behind snapshot by
 // shelling out to the git CLI. `git status --porcelain=v2 --branch` is a
 // stable machine-readable format and yields everything in one subprocess.

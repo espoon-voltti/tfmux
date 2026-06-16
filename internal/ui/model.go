@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 City of Espoo
+//
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
 // Package ui is the Bubble Tea TUI: a repo→module→workspace tree with
 // at-a-glance statuses, a detail viewport for plan logs, and keybindings to
 // orchestrate plans (headless, parallel) and applies (tmux windows).

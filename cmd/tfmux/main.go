@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 City of Espoo
+//
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
 // tfmux: a TUI for orchestrating terraform plan/apply across many repos,
 // root modules and workspaces.
 package main

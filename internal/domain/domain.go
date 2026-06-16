@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 City of Espoo
+//
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
 // Package domain holds the shared model: repos, root modules, workspaces and
 // their statuses. It has no dependencies on other tfmux packages so every
 // layer can import it.

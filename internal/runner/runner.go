@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 City of Espoo
+//
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
 // Package runner executes terraform work as scheduled tasks with bounded,
 // prioritized parallelism.
 //

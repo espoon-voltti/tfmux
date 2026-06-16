@@ -1,0 +1,9 @@
+version = 1
+SPDX-PackageName = "tfmux"
+SPDX-PackageDownloadLocation = "https://github.com/espoon-voltti/tfmux"
+
+[[annotations]]
+path = ["go.mod", "go.sum"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 City of Espoo"
+SPDX-License-Identifier = "LGPL-2.1-or-later"

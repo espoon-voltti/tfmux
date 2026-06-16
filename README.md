@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 City of Espoo
+
+SPDX-License-Identifier: LGPL-2.1-or-later
+-->
+
 # tfmux
 
 A terminal UI for keeping dozens of Terraform repos, root modules and
@@ -127,3 +133,31 @@ go test ./...
 
 Tests use a fake `terraform` shell stub (`internal/tftest`) — no cloud
 credentials needed, including the end-to-end TUI test (teatest).
+
+## License
+
+tfmux is published under **LGPL-2.1-or-later** license. Please refer to
+[LICENSE](LICENSE) for further details.
+
+### Check licensing compliance
+
+This repository targets [REUSE](https://reuse.software/) compliance by utilizing
+the [reuse CLI tool](https://git.fsfe.org/reuse/tool). Bulk-licensing for files
+that cannot carry a header (e.g. `go.sum`) is applied via
+[`REUSE.toml`](./REUSE.toml). Compliance is enforced in CI (see
+[`.github/workflows/ci.yml`](./.github/workflows/ci.yml)).
+
+To manually check that the repository is compliant (e.g. before submitting a
+pull request), run:
+
+```sh
+./bin/add-license-headers.sh --lint-only
+```
+
+### Automatically add licensing headers
+
+To **attempt** to automatically add licensing headers to all source files, run:
+
+```sh
+./bin/add-license-headers.sh
+```
