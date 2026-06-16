@@ -56,9 +56,9 @@ resource "null_resource" "x" {}
 
 func TestIsRootModule(t *testing.T) {
 	cases := []struct {
-		name    string
-		files   map[string]string
-		want    bool
+		name  string
+		files map[string]string
+		want  bool
 	}{
 		{"backend block", map[string]string{"main.tf": backendModule}, true},
 		{"cloud block", map[string]string{"main.tf": cloudModule}, true},
