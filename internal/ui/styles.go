@@ -32,12 +32,13 @@ var (
 	stylePlanHead    = lipgloss.NewStyle().Bold(true)
 )
 
-// humanDur renders "3m", "2h", "5d" style relative times.
+// humanDur renders "3m", "2h", "5d" style relative times. Sub-minute ages
+// read as "0m" rather than ticking seconds, to keep fresh rows from flickering.
 func humanDur(since time.Time) string {
 	d := time.Since(since)
 	switch {
 	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
+		return "0m"
 	case d < time.Hour:
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	case d < 24*time.Hour:
