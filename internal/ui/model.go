@@ -117,7 +117,7 @@ func NewModel(cfg *config.Config, store *state.Store) *Model {
 		ignore:       state.Ignore{},
 		spinner:      sp,
 		filter:       fi,
-		help:         help.New(),
+		help:         newHelp(),
 		discovering:  true,
 	}
 }
