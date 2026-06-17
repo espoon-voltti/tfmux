@@ -74,7 +74,10 @@ consequences:
 - Plans use **`TF_WORKSPACE`, never `terraform workspace select`** — selecting
   mutates `.terraform/environment` shared with the user's shell.
 - **Per-module serialization:** two tasks never run in the same module dir at
-  once (any command can lazily `init` and mutate `.terraform/`).
+  once (any command can lazily `init` and mutate `.terraform/`). In-process
+  it's the runner's `busyModule` check; across concurrent tfmux instances it's
+  an `flock` on the module's state-dir `lock` file, held for each task's
+  duration (`internal/runner/lock_unix.go`).
 - **`init` is lazy and never `-upgrade`** implicitly (that rewrites the lock
   file). All commands run `-input=false`.
 - **Plan files contain secrets:** stored under the XDG state dir with 0700/0600

@@ -13,7 +13,9 @@
 //   - a global slot count caps concurrent work (config `parallelism`)
 //   - per-module serialization: at most one task runs in a module directory at
 //     a time, because any task can lazily `terraform init` (mutating
-//     .terraform/ and the lock file)
+//     .terraform/ and the lock file). Within a process this is the busyModule
+//     check; across concurrent tfmux instances it's an flock on the module's
+//     state-dir lock file, held for the duration of each task.
 //   - a priority queue picks the most valuable ready task whose module is free:
 //     applies preempt plans, plans preempt enumerations
 //   - workspaces are selected via TF_WORKSPACE inside tfexec, never
@@ -234,24 +236,7 @@ func (r *Runner) pickLocked() *task {
 }
 
 func (r *Runner) execute(t *task) {
-	var out Event
-	if t.ctx.Err() != nil {
-		out = Event{Phase: PhaseCanceled}
-	} else {
-		r.emit(Event{Kind: t.kind, Key: t.key, ModulePath: t.modulePath, Phase: PhaseRunning})
-		out = t.job(t.ctx, func(e Event) {
-			e.Kind, e.Key, e.ModulePath = t.kind, t.key, t.modulePath
-			r.emit(e)
-		})
-		switch {
-		case t.ctx.Err() != nil:
-			out = Event{Phase: PhaseCanceled}
-		case out.Err != "":
-			out.Phase = PhaseFailed
-		default:
-			out.Phase = PhaseDone
-		}
-	}
+	out := r.runJob(t)
 	out.Kind, out.Key, out.ModulePath = t.kind, t.key, t.modulePath
 
 	r.mu.Lock()
@@ -262,6 +247,53 @@ func (r *Runner) execute(t *task) {
 	r.mu.Unlock()
 
 	r.emit(out)
+}
+
+// runJob acquires the cross-process module lock, runs the task body, and
+// returns its terminal event (Phase stamped; Kind/Key/ModulePath filled in by
+// execute). PhaseRunning is emitted only once the lock is held — a task waiting
+// on another instance stays "queued" to the UI until it can actually run. The
+// caller owns the in-process slot/busyModule bookkeeping.
+func (r *Runner) runJob(t *task) Event {
+	if t.ctx.Err() != nil {
+		return Event{Phase: PhaseCanceled}
+	}
+	lock, err := r.lockModule(t.ctx, t.modulePath)
+	if err != nil {
+		if t.ctx.Err() != nil {
+			return Event{Phase: PhaseCanceled} // canceled while waiting for the lock
+		}
+		return Event{Phase: PhaseFailed, Err: "module lock: " + err.Error()}
+	}
+	defer lock.Close() // releases the flock
+
+	r.emit(Event{Kind: t.kind, Key: t.key, ModulePath: t.modulePath, Phase: PhaseRunning})
+	out := t.job(t.ctx, func(e Event) {
+		e.Kind, e.Key, e.ModulePath = t.kind, t.key, t.modulePath
+		r.emit(e)
+	})
+	switch {
+	case t.ctx.Err() != nil:
+		return Event{Phase: PhaseCanceled}
+	case out.Err != "":
+		out.Phase = PhaseFailed
+	default:
+		out.Phase = PhaseDone
+	}
+	return out
+}
+
+// lockModule takes the module's cross-process exclusive lock (held until the
+// returned file is closed). The busyModule check already guarantees no other
+// task in this process is in the same module dir, so this only ever blocks on a
+// different tfmux instance — in which case the wait is exactly the
+// serialization we want.
+func (r *Runner) lockModule(ctx context.Context, modulePath string) (*os.File, error) {
+	path, err := r.store.ModuleLockPath(modulePath)
+	if err != nil {
+		return nil, err
+	}
+	return flockExclusive(ctx, path)
 }
 
 // enqueue registers a task and wakes the scheduler. Returns false when a task
@@ -429,6 +461,12 @@ func (r *Runner) EnqueuePlan(w *domain.Workspace) bool {
 // completion, holding a pool slot the whole time. plannedVersion guards against
 // applying a plan made with a different terraform binary. Returns false if
 // already in flight.
+//
+// The module lock is held (by runJob) for as long as we watch the apply, so a
+// concurrent instance can't touch the module mid-apply. The one gap: the
+// apply's terraform runs in tmux and outlives tfmux, so quitting tfmux during
+// an apply drops the lock early. A restart re-adopts the apply (EnqueueApplyPoll)
+// and re-takes the lock; Terraform's own backend state lock covers the gap.
 func (r *Runner) EnqueueApply(w *domain.Workspace, plannedVersion string) bool {
 	m := w.Module
 	return r.enqueue(KindApply, w.Key(), m.Path, func(ctx context.Context, emit func(Event)) Event {

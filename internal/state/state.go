@@ -11,6 +11,7 @@
 //	├── ignore.json
 //	└── modules/<sha256(absModulePath)[:16]>/
 //	    ├── module.json              back-reference for debugging/GC
+//	    ├── lock                     flock'd to serialize work across instances
 //	    ├── workspaces.json          cached workspace enumeration
 //	    └── ws/<workspaceName>/
 //	        ├── run.json             RunRecord
@@ -134,6 +135,18 @@ func (s *Store) ModuleLogPath(modulePath, name string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, name+".log"), nil
+}
+
+// ModuleLockPath returns the path of a module's cross-process lock file,
+// creating the module dir. tfmux instances flock this to serialize terraform
+// work in the module dir (any task can lazily `init` and mutate .terraform/),
+// extending the runner's in-process per-module serialization across instances.
+func (s *Store) ModuleLockPath(modulePath string) (string, error) {
+	dir, err := s.ModuleDir(modulePath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "lock"), nil
 }
 
 func (s *Store) PlanLogPath(modulePath, workspace string) (string, error) {
