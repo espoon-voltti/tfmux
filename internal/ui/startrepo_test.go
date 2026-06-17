@@ -5,6 +5,7 @@
 package ui
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/espoon-voltti/tfmux/internal/domain"
@@ -33,6 +34,29 @@ func twoRepos(t *testing.T) (*Model, *domain.Repo, *domain.Repo) {
 	m.reflow()
 	m.cursor = 0 // start on repo1
 	return m, repo1, repo2
+}
+
+// A repo far down the list lands at the top of the viewport (so its modules
+// and workspaces are visible), not merely on the bottom row.
+func TestJumpToStartRepoPositionsAtTop(t *testing.T) {
+	m, _ := fixtureModel(t)
+	var repos []*domain.Repo
+	for i := 0; i < 100; i++ {
+		repos = append(repos, &domain.Repo{Path: fmt.Sprintf("/iac/r%03d", i), Name: fmt.Sprintf("r%03d", i)})
+	}
+	m.repos = repos
+	m.reflow()
+	m.cursor, m.top = 0, 0 // start at the very top
+
+	m.startDir = repos[40].Path
+	m.jumpToStartRepo()
+
+	if m.cursor != 40 {
+		t.Fatalf("cursor = %d, want 40", m.cursor)
+	}
+	if m.top != m.cursor {
+		t.Fatalf("repo should sit at the top of the viewport: top=%d cursor=%d", m.top, m.cursor)
+	}
 }
 
 func TestJumpToStartRepoInModule(t *testing.T) {

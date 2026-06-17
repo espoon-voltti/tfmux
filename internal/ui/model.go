@@ -314,8 +314,19 @@ func (m *Model) jumpToStartRepo() {
 			}
 		}
 	}
-	if best != nil {
-		m.focusNode(best.Path)
+	if best == nil {
+		return
+	}
+	for i, r := range m.rows {
+		if r.kind == rowRepo && r.repo == best {
+			// Land with the repo at the top of the viewport, not merely on screen,
+			// so its modules and workspaces below it are visible (ensureVisible's
+			// minimal scroll would otherwise leave a far-down repo on the last row).
+			m.cursor = i
+			m.top = i
+			m.ensureVisible() // clamp only (cursor is already at top)
+			return
+		}
 	}
 }
 
