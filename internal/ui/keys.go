@@ -8,6 +8,8 @@ import "github.com/charmbracelet/bubbles/key"
 
 type keyMap struct {
 	Up, Down, Left, Right key.Binding
+	CollapseOthers        key.Binding
+	ExpandAll             key.Binding
 	PageUp, PageDown      key.Binding
 	Mark                  key.Binding
 	Plan, PlanAll         key.Binding
@@ -33,6 +35,8 @@ var keys = keyMap{
 	PageDown:          key.NewBinding(key.WithKeys("pgdown", "ctrl+d"), key.WithHelp("PgDn", "page down")),
 	Left:              key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "collapse")),
 	Right:             key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "expand")),
+	CollapseOthers:    key.NewBinding(key.WithKeys("H", "shift+left"), key.WithHelp("H/⇧←", "collapse others")),
+	ExpandAll:         key.NewBinding(key.WithKeys("L", "shift+right"), key.WithHelp("L/⇧→", "expand all")),
 	Mark:              key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "mark")),
 	Plan:              key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "plan marked/cursor")),
 	PlanAll:           key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "plan all")),
@@ -62,7 +66,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 // FullHelp feeds the expanded help overlay.
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Up, k.Down, k.PageUp, k.PageDown, k.Left, k.Right, k.Mark, k.Filter},
+		{k.Up, k.Down, k.PageUp, k.PageDown, k.Left, k.Right, k.CollapseOthers, k.ExpandAll, k.Mark, k.Filter},
 		{k.Plan, k.PlanAll, k.Cancel, k.View, k.Discard},
 		{k.Apply, k.InitUpgrade, k.Tasks, k.CancelAll},
 		{k.Ignore, k.ShowIgnored, k.Refresh, k.RefreshWorkspaces, k.Rediscover},

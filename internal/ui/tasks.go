@@ -157,8 +157,6 @@ func (m *Model) renderTaskPane(height int) string {
 	m.clampTaskCursor()
 
 	var b strings.Builder
-	b.WriteString(styleDetailTitle.Render(fmt.Sprintf("Tasks (%d)", len(tasks))))
-	b.WriteString("\n\n")
 	if len(tasks) == 0 {
 		b.WriteString(styleDim.Render("  no active tasks"))
 		b.WriteString("\n\n")
@@ -166,7 +164,7 @@ func (m *Model) renderTaskPane(height int) string {
 		return b.String()
 	}
 
-	listH := height - 4 // title + blank + blank + footer
+	listH := height - 2 // list + blank + footer
 	if listH < 1 {
 		listH = 1
 	}

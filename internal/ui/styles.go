@@ -54,6 +54,7 @@ var (
 	styleHelpDesc    = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
 	styleHelpSep     = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
 	styleDetailTitle = lipgloss.NewStyle().Bold(true).Underline(true)
+	styleHeaderCtx   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252"))
 
 	stylePlanAdd     = lipgloss.NewStyle().Foreground(lipgloss.Color("78"))
 	stylePlanDestroy = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))

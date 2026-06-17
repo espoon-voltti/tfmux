@@ -253,6 +253,119 @@ func TestCancelQueuedClearsTask(t *testing.T) {
 	}
 }
 
+// twoRepoModel builds two repos, each with two modules, for collapse tests.
+func twoRepoModel(t *testing.T) *Model {
+	t.Helper()
+	m := NewModel(config.Default(), state.New(t.TempDir()))
+	m.width, m.height = 100, 30
+	var repos []*domain.Repo
+	for _, rn := range []string{"repo1", "repo2"} {
+		repo := &domain.Repo{Path: "/iac/" + rn, Name: rn}
+		for _, mn := range []string{"a", "b"} {
+			mod := &domain.Module{Repo: repo, Path: "/iac/" + rn + "/" + mn, RelPath: mn, TFBin: "terraform"}
+			repo.Modules = append(repo.Modules, mod)
+		}
+		repos = append(repos, repo)
+	}
+	m.repos = repos
+	m.reflow()
+	return m
+}
+
+// H collapses every other repo (and its modules), leaving the cursor's repo and
+// all its root modules expanded, and keeps the cursor on its item.
+func TestCollapseOthersZoomsToCursor(t *testing.T) {
+	m := twoRepoModel(t)
+	mod := m.repos[0].Modules[0] // repo1/a
+	enumerated(t, m, mod, "prod")
+	// rows: repo1, a, prod, b, repo2, c, d ; put cursor on workspace prod
+	m.cursor = 2
+	if r, _ := m.currentRow(); r.kind != rowWorkspace {
+		t.Fatalf("setup: cursor not on workspace, got %v", r.kind)
+	}
+
+	keyPress(m, "H")
+
+	if !m.collapsed[m.repos[1].Path] {
+		t.Error("other repo should be collapsed")
+	}
+	if m.collapsed[m.repos[0].Path] {
+		t.Error("cursor's repo should stay expanded")
+	}
+	for _, sib := range m.repos[0].Modules {
+		if m.collapsed[sib.Path] {
+			t.Errorf("module %s in the cursor's repo should stay expanded", sib.RelPath)
+		}
+	}
+	if r, ok := m.currentRow(); !ok || r.kind != rowWorkspace || r.ws.Name != "prod" {
+		t.Errorf("cursor should stay on the workspace, got %+v", r)
+	}
+}
+
+// L expands the whole tree, keeping the cursor on its item.
+func TestExpandAllUncollapses(t *testing.T) {
+	m := twoRepoModel(t)
+	m.collapsed[m.repos[0].Path] = true
+	m.collapsed[m.repos[1].Modules[0].Path] = true
+	m.reflow()
+	m.cursor = 0 // repo1 row
+
+	keyPress(m, "L")
+
+	if len(m.collapsed) != 0 {
+		t.Errorf("expand all should clear collapsed state, got %v", m.collapsed)
+	}
+	if r, ok := m.currentRow(); !ok || r.kind != rowRepo || r.repo.Name != "repo1" {
+		t.Errorf("cursor should stay on repo1, got %+v", r)
+	}
+}
+
+// The title bar shows data-scale counts on the main view and the plan's
+// repo/module/workspace when a plan log is open.
+func TestTitleBarContext(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	if !strings.Contains(firstLine(m.View()), "1 repos · 1 root modules · 1 workspaces") {
+		t.Errorf("main view header missing counts: %q", firstLine(m.View()))
+	}
+
+	m.cursor = 2 // workspace row
+	m.detailTitle = m.detailTitleFor(runner.KindPlan, mod.Path+"//prod")
+	m.focus = focusDetail
+	if !strings.Contains(firstLine(m.View()), "repo1 · envs/prod · prod") {
+		t.Errorf("detail header missing plan context: %q", firstLine(m.View()))
+	}
+}
+
+// The main-view totals exclude ignored items, but counting everything once Z
+// reveals them.
+func TestTitleBarCountsRespectIgnores(t *testing.T) {
+	m := twoRepoModel(t)
+	for _, repo := range m.repos {
+		for _, mod := range repo.Modules {
+			enumerated(t, m, mod, "default", "prod")
+		}
+	}
+	// 2 repos · 4 modules · 8 workspaces with nothing ignored
+	if !strings.Contains(firstLine(m.View()), "2 repos · 4 root modules · 8 workspaces") {
+		t.Fatalf("unignored counts wrong: %q", firstLine(m.View()))
+	}
+
+	// ignore one whole repo and one module of the other
+	m.ignore[m.repos[0].Path] = true
+	m.ignore[m.repos[1].Modules[0].Path] = true
+	m.reflow()
+	if !strings.Contains(firstLine(m.View()), "1 repos · 1 root modules · 2 workspaces") {
+		t.Errorf("ignored counts not excluded: %q", firstLine(m.View()))
+	}
+
+	// Z reveals everything → count all again
+	m.showIgnored = true
+	if !strings.Contains(firstLine(m.View()), "2 repos · 4 root modules · 8 workspaces") {
+		t.Errorf("Z should count everything: %q", firstLine(m.View()))
+	}
+}
+
 // Ignored items, when revealed with Z, render with the muted marker.
 func TestIgnoredRowRendersMuted(t *testing.T) {
 	m, mod := fixtureModel(t)

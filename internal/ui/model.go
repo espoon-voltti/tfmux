@@ -80,6 +80,7 @@ type Model struct {
 	detail       viewport.Model
 	detailKey    string
 	detailFollow string // workspace key whose live plan log is being tailed
+	detailTitle  string // title-bar context for whatever the detail viewport shows
 	filter       textinput.Model
 	filterText   string
 	spinner      spinner.Model
@@ -455,6 +456,24 @@ func (m *Model) logPath(kind runner.Kind, key string) (string, error) {
 	return "", fmt.Errorf("no log for %s", kind)
 }
 
+// detailTitleFor builds the title-bar context for a detail view: the repo, root
+// module and (for plan/apply) workspace the log belongs to.
+func (m *Model) detailTitleFor(kind runner.Kind, key string) string {
+	switch kind {
+	case runner.KindPlan, runner.KindApply:
+		if mp, ws, ok := splitWSKey(key); ok {
+			if mod := m.findModule(mp); mod != nil {
+				return mod.Repo.Name + " · " + mod.RelPath + " · " + ws
+			}
+		}
+	case runner.KindEnumerate, runner.KindInit:
+		if mod := m.findModule(key); mod != nil {
+			return mod.Repo.Name + " · " + mod.RelPath
+		}
+	}
+	return key
+}
+
 // openLog shows a task's log in the detail viewport, following it live while
 // the task is in flight.
 func (m *Model) openLog(kind runner.Kind, key string) tea.Cmd {
@@ -463,6 +482,7 @@ func (m *Model) openLog(kind runner.Kind, key string) tea.Cmd {
 		m.status = "no log available"
 		return nil
 	}
+	m.detailTitle = m.detailTitleFor(kind, key)
 	id := runner.TaskID(kind, key)
 	m.detailFollow = ""
 	if m.hasTask(kind, key) {
@@ -610,6 +630,10 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			delete(m.collapsed, r.nodeKey())
 			m.reflow()
 		}
+	case key.Matches(msg, keys.CollapseOthers):
+		m.collapseOthers()
+	case key.Matches(msg, keys.ExpandAll):
+		m.expandAll()
 	case key.Matches(msg, keys.Mark):
 		if r, ok := m.currentRow(); ok && r.kind == rowWorkspace {
 			k := r.ws.Key()
@@ -677,6 +701,53 @@ func (m *Model) currentRow() (row, bool) {
 		return row{}, false
 	}
 	return m.rows[m.cursor], true
+}
+
+// collapseOthers collapses every other repo (and its modules), leaving the
+// cursor's repo and all its root modules expanded — zooming the tree onto the
+// repository under the cursor.
+func (m *Model) collapseOthers() {
+	r, ok := m.currentRow()
+	if !ok {
+		return
+	}
+	target := r.nodeKey()
+	m.collapsed = map[string]bool{}
+	for _, repo := range m.repos {
+		if repo == r.repo {
+			continue // leave the current repo and all its modules expanded
+		}
+		m.collapsed[repo.Path] = true
+		for _, mod := range repo.Modules {
+			m.collapsed[mod.Path] = true
+		}
+	}
+	m.reflow()
+	m.focusNode(target)
+}
+
+// expandAll un-collapses the whole tree, keeping the cursor on its item.
+func (m *Model) expandAll() {
+	target := ""
+	if r, ok := m.currentRow(); ok {
+		target = r.nodeKey()
+	}
+	m.collapsed = map[string]bool{}
+	m.reflow()
+	if target != "" {
+		m.focusNode(target)
+	}
+}
+
+// focusNode moves the cursor to the row matching nodeKey, if still visible.
+func (m *Model) focusNode(nodeKey string) {
+	for i, r := range m.rows {
+		if r.nodeKey() == nodeKey {
+			m.cursor = i
+			break
+		}
+	}
+	m.ensureVisible()
 }
 
 func (m *Model) reflow() {
@@ -1045,6 +1116,7 @@ func (m *Model) viewModule(mod *domain.Module) tea.Cmd {
 	case mod.WorkspaceState == domain.WorkspacesError:
 		m.detailFollow = ""
 		m.detailKey = "err:" + mod.Path
+		m.detailTitle = m.detailTitleFor(runner.KindEnumerate, mod.Path)
 		m.detail.SetContent(colorizePlanLog(mod.WorkspaceErr))
 		m.detail.GotoTop()
 		m.focus = focusDetail
@@ -1068,6 +1140,45 @@ func (m *Model) attachWindow(windowID string) tea.Cmd {
 }
 
 // --- view ---
+
+// headerContext is the title-bar context for the current screen: the data scale
+// on the main tree, the task count on the task pane, or which plan/module the
+// detail viewport is showing. The app title (tfmux) stays visible alongside it.
+func (m *Model) headerContext() string {
+	if m.showHelp {
+		return "Help"
+	}
+	switch m.focus {
+	case focusTasks:
+		return fmt.Sprintf("Tasks (%d)", len(m.tasks))
+	case focusDetail:
+		return m.detailTitle
+	default:
+		// Mirror flatten's ignore logic: skip ignored items unless Z reveals them.
+		var repos, mods, wss int
+		for _, repo := range m.repos {
+			repoIgnored := m.ignore[repo.Path]
+			if repoIgnored && !m.showIgnored {
+				continue
+			}
+			repos++
+			for _, mod := range repo.Modules {
+				modIgnored := repoIgnored || m.ignore[mod.Path]
+				if modIgnored && !m.showIgnored {
+					continue
+				}
+				mods++
+				for _, ws := range mod.Workspaces {
+					if (modIgnored || m.ignore[ws.Key()]) && !m.showIgnored {
+						continue
+					}
+					wss++
+				}
+			}
+		}
+		return fmt.Sprintf("%d repos · %d root modules · %d workspaces", repos, mods, wss)
+	}
+}
 
 func (m *Model) View() string {
 	if m.width == 0 {
@@ -1099,7 +1210,14 @@ func (m *Model) View() string {
 	if !m.tmuxOK {
 		meta = append(meta, styleError.Render("tmux: unavailable"))
 	}
-	header := title + "  " + styleDim.Render(strings.Join(meta, "  "))
+	parts := []string{title}
+	if ctx := m.headerContext(); ctx != "" {
+		parts = append(parts, styleHeaderCtx.Render(ctx))
+	}
+	if len(meta) > 0 {
+		parts = append(parts, styleDim.Render(strings.Join(meta, "  ")))
+	}
+	header := strings.Join(parts, "  ")
 
 	bodyHeight := m.height - 3
 	var body string
