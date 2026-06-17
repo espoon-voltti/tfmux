@@ -89,6 +89,7 @@ type Model struct {
 	detail       viewport.Model
 	detailKey    string
 	detailFollow string // workspace key whose live plan log is being tailed
+	detailBottom bool   // open this log at the bottom (plan logs: the add/change/destroy summary)
 	detailTitle  string // title-bar context for whatever the detail viewport shows
 	filter       textinput.Model
 	filterText   string
@@ -565,6 +566,10 @@ func (m *Model) openLog(kind runner.Kind, key string) tea.Cmd {
 	}
 	m.detailTitle = m.detailTitleFor(kind, key)
 	id := runner.TaskID(kind, key)
+	// A plan log's payload is at the end: the add/change/destroy summary (and,
+	// for a small plan, the whole thing). Open it scrolled to the bottom so
+	// that's what the user lands on, past the state-refresh chatter.
+	m.detailBottom = kind == runner.KindPlan
 	m.detailFollow = ""
 	if m.hasTask(kind, key) {
 		m.detailFollow = id
@@ -604,7 +609,11 @@ func (m *Model) updateLog(msg logMsg) (tea.Model, tea.Cmd) {
 	m.detail.SetContent(colorizePlanLog(msg.content))
 
 	if !following {
-		m.detail.GotoTop()
+		if m.detailBottom {
+			m.detail.GotoBottom()
+		} else {
+			m.detail.GotoTop()
+		}
 		return m, nil
 	}
 	if firstOpen || atBottom {
