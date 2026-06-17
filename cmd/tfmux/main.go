@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -46,6 +47,8 @@ func run(args []string) error {
 		return nil
 	case "ls":
 		return runLs(args)
+	case "import-workspaces":
+		return runImportWorkspaces()
 	case "tui":
 		return runTUI()
 	case "help", "--help", "-h":
@@ -64,6 +67,9 @@ commands:
   tui        launch the interactive TUI (default)
   ls         print discovered repos, modules and git status
   ls --json  same, as JSON
+  import-workspaces
+             seed module workspace lists from a JSON object
+             ({"<module path>": ["ws", …], …}) read on stdin
   version    print version
 `)
 }
@@ -186,6 +192,32 @@ func printJSON(repos []*domain.Repo) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+// runImportWorkspaces reads a JSON object mapping absolute module paths to
+// their workspace lists from stdin and writes each into the workspace cache, as
+// if enumerated now. This lets external tooling (e.g. a setup script) pre-seed
+// the workspaces a module should show without hitting the backend. The cache is
+// authoritative until the user re-enumerates from the real backend ('w' in the
+// TUI), so seeding is fully reversible.
+func runImportWorkspaces() error {
+	var manifest map[string][]string
+	if err := json.NewDecoder(os.Stdin).Decode(&manifest); err != nil {
+		return fmt.Errorf("reading workspace manifest from stdin: %w", err)
+	}
+	stateDir, err := paths.StateDir()
+	if err != nil {
+		return err
+	}
+	store := state.New(stateDir)
+	now := time.Now()
+	for modulePath, workspaces := range manifest {
+		if err := store.SaveWorkspaces(modulePath, workspaces, now); err != nil {
+			return fmt.Errorf("saving workspaces for %s: %w", modulePath, err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "tfmux: seeded workspaces for %d module(s)\n", len(manifest))
+	return nil
 }
 
 func runTUI() error {
