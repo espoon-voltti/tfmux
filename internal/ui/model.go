@@ -139,7 +139,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.detail.Width = m.width/2 - 2
+		m.detail.Width = m.width
 		m.detail.Height = m.height - 4
 		m.ensureVisible()
 		return m, nil
@@ -1225,19 +1225,14 @@ func (m *Model) View() string {
 		body = m.help.FullHelpView(keys.FullHelp())
 	} else if m.focus == focusTasks {
 		body = m.renderTaskPane(bodyHeight)
+	} else if m.focus == focusDetail {
+		// The plan log takes the full width; the tree's cursor is hidden, so the
+		// title bar carries which plan we're reading.
+		m.detail.Width = m.width
+		m.detail.Height = bodyHeight
+		body = m.detail.View()
 	} else {
-		tree := m.renderTree(bodyHeight)
-		if m.focus == focusDetail {
-			treeW := m.width / 2
-			m.detail.Width = m.width - treeW - 1
-			m.detail.Height = bodyHeight
-			body = lipgloss.JoinHorizontal(lipgloss.Top,
-				lipgloss.NewStyle().Width(treeW).MaxWidth(treeW).Render(tree),
-				m.detail.View(),
-			)
-		} else {
-			body = tree
-		}
+		body = m.renderTree(bodyHeight)
 	}
 
 	statusLeft := m.status
@@ -1275,9 +1270,6 @@ func (m *Model) renderTree(height int) string {
 		return styleDim.Render("  nothing found under configured roots")
 	}
 	treeWidth := m.width
-	if m.focus == focusDetail {
-		treeWidth = m.width / 2
-	}
 	start := m.top
 	if maxStart := len(m.rows) - height; start > maxStart {
 		start = maxStart
