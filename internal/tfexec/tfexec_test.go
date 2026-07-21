@@ -69,6 +69,28 @@ func TestWorkspaceListInitsWhenMissing(t *testing.T) {
 	}
 }
 
+// Regression: init output must not be parsed as workspace names when workspace
+// list triggers an init retry.
+func TestWorkspaceListInitRetryNoGarbage(t *testing.T) {
+	tf, logFile := newTF(t)
+	tf.Env = append(tf.Env, "TFMUX_FAKE_NEED_INIT=1")
+	if err := os.MkdirAll(filepath.Join(tf.Dir, ".terraform"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := tf.WorkspaceList(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"default", "prod", "staging"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("workspaces = %v, want %v", got, want)
+	}
+	cs := calls(t, logFile)
+	if len(cs) != 3 {
+		t.Fatalf("expected workspace list, init, workspace list — got %v", cs)
+	}
+}
+
 func TestPlanWorkspaceEnvAndExitCodes(t *testing.T) {
 	for _, exit := range []int{PlanClean, PlanError, PlanChanges} {
 		tf, logFile := newTF(t)

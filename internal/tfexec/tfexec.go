@@ -150,7 +150,10 @@ func (t TF) runWithInitRetry(ctx context.Context, fn func() (Result, error)) (Re
 		return initRes, err
 	}
 	retry, err := fn()
-	retry.Output = append(initRes.Output, retry.Output...)
+	if err != nil || retry.ExitCode != 0 {
+		// Prepend init output so the error shows the full story.
+		retry.Output = append(initRes.Output, retry.Output...)
+	}
 	return retry, err
 }
 
