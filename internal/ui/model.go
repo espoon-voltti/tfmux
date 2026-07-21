@@ -789,8 +789,12 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Ignore):
 		return m, m.toggleIgnore()
 	case key.Matches(msg, keys.ShowIgnored):
+		prev, hasPrev := m.currentRow()
 		m.showIgnored = !m.showIgnored
 		m.reflow()
+		if hasPrev {
+			m.focusNode(prev.nodeKey())
+		}
 	case key.Matches(msg, keys.InitUpgrade):
 		m.initUpgradeCurrent()
 	case key.Matches(msg, keys.Refresh):

@@ -477,6 +477,35 @@ func TestSpinnerStopsWhenIdleAndRearms(t *testing.T) {
 	}
 }
 
+// Z retains the cursor on the previously focused item when showing ignored
+// items; when hiding them again, the cursor stays if the item is still visible.
+func TestShowIgnoredRetainsCursor(t *testing.T) {
+	m := twoRepoModel(t)
+	for _, repo := range m.repos {
+		for _, mod := range repo.Modules {
+			enumerated(t, m, mod, "default", "prod")
+		}
+	}
+	// ignore entire repo1 (rows 0–4) so they vanish; cursor lands on repo2
+	m.ignore[m.repos[0].Path] = true
+	m.reflow()
+	// move cursor to repo2/b/prod (last visible workspace)
+	m.cursor = len(m.rows) - 1
+	focused, _ := m.currentRow()
+
+	// Z: show ignored — repo1's rows insert before repo2; cursor must stay on same item
+	keyPress(m, "Z")
+	if r, _ := m.currentRow(); r.nodeKey() != focused.nodeKey() {
+		t.Errorf("after showing ignored: cursor on %q, want %q", r.nodeKey(), focused.nodeKey())
+	}
+
+	// Z again: hide ignored — item is still visible (it was never ignored)
+	keyPress(m, "Z")
+	if r, _ := m.currentRow(); r.nodeKey() != focused.nodeKey() {
+		t.Errorf("after hiding ignored: cursor on %q, want %q", r.nodeKey(), focused.nodeKey())
+	}
+}
+
 // Ignored items, when revealed with Z, render with the muted marker.
 func TestIgnoredRowRendersMuted(t *testing.T) {
 	m, mod := fixtureModel(t)
