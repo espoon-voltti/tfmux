@@ -188,6 +188,79 @@ func TestRefreshWorkspacesReEnumerates(t *testing.T) {
 	drainEnum(t, m, 1) // let the async job finish before TempDir cleanup
 }
 
+// r fans out one gitStatusMsg (per repo) and one fingerprintMsg (per
+// non-ignored module) plus an expiredPlansMsg, all tagged with the same
+// refresh generation. The status bar should stay on "refreshing…" until every
+// one of them has reported back, then announce completion.
+func TestRefreshAnnouncesCompletion(t *testing.T) {
+	m, _ := fixtureModel(t) // one repo, one module (see fixtureModel)
+
+	m.refresh()
+	gen := m.refreshGen
+
+	if m.status != "refreshing…" {
+		t.Fatalf("status = %q, want refreshing…", m.status)
+	}
+
+	m.Update(gitStatusMsg{repoPath: m.repos[0].Path, gen: gen})
+	if m.status != "refreshing…" {
+		t.Fatalf("status = %q after gitStatusMsg, want still refreshing…", m.status)
+	}
+
+	m.Update(fingerprintMsg{modulePath: m.repos[0].Modules[0].Path, fingerprint: "abc", gen: gen})
+	if m.status != "refreshing…" {
+		t.Fatalf("status = %q after fingerprintMsg, want still refreshing…", m.status)
+	}
+
+	m.Update(expiredPlansMsg{n: 0, gen: gen})
+	if m.status != "refreshed" {
+		t.Errorf("status = %q, want refreshed", m.status)
+	}
+}
+
+// The completion message folds in the expired-plan count, when nonzero.
+func TestRefreshAnnouncesExpiredPlans(t *testing.T) {
+	m, _ := fixtureModel(t)
+
+	m.refresh()
+	gen := m.refreshGen
+
+	m.Update(gitStatusMsg{repoPath: m.repos[0].Path, gen: gen})
+	m.Update(fingerprintMsg{modulePath: m.repos[0].Modules[0].Path, fingerprint: "abc", gen: gen})
+	m.Update(expiredPlansMsg{n: 2, gen: gen})
+
+	if want := "refreshed — expired 2 stale plan file(s)"; m.status != want {
+		t.Errorf("status = %q, want %q", m.status, want)
+	}
+}
+
+// Pressing r again mid-refresh supersedes the previous generation: stragglers
+// from gen 1 must not complete gen 2's count early or clobber its status.
+func TestRefreshSupersedesPreviousGeneration(t *testing.T) {
+	m, _ := fixtureModel(t)
+
+	m.refresh()
+	gen1 := m.refreshGen
+
+	m.refresh() // superseded before gen1 finished
+	gen2 := m.refreshGen
+
+	// A straggler from gen1 must not count toward gen2.
+	m.Update(gitStatusMsg{repoPath: m.repos[0].Path, gen: gen1})
+	m.Update(fingerprintMsg{modulePath: m.repos[0].Modules[0].Path, fingerprint: "abc", gen: gen1})
+	m.Update(expiredPlansMsg{n: 0, gen: gen1})
+	if m.status != "refreshing…" {
+		t.Fatalf("stale gen1 messages completed the refresh: status = %q", m.status)
+	}
+
+	m.Update(gitStatusMsg{repoPath: m.repos[0].Path, gen: gen2})
+	m.Update(fingerprintMsg{modulePath: m.repos[0].Modules[0].Path, fingerprint: "abc", gen: gen2})
+	m.Update(expiredPlansMsg{n: 0, gen: gen2})
+	if m.status != "refreshed" {
+		t.Errorf("status = %q, want refreshed", m.status)
+	}
+}
+
 // Enter on a module whose enumeration failed opens the full error in the
 // detail viewport (the row itself only shows the first line).
 func TestViewEnumerationErrorLog(t *testing.T) {

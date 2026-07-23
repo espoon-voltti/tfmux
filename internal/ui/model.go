@@ -85,6 +85,13 @@ type Model struct {
 	// ignore/showIgnored) so View doesn't rescan every frame.
 	nRepos, nModules, nWorkspaces int
 
+	// refreshGen/refreshLeft join the concurrent git-status/fingerprint/expiry
+	// commands fanned out by refresh() so its completion can be announced.
+	// refreshExpired carries the expired-plan count into that final message.
+	refreshGen     int
+	refreshLeft    int
+	refreshExpired int
+
 	focus        focusArea
 	detail       viewport.Model
 	detailKey    string
@@ -149,7 +156,7 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		discoverCmd(m.cfg.Roots, false),
 		waitForEvent(m.runner.Events),
-		expirePlansCmd(m.store, m.cfg.PlanTTLDuration()),
+		expirePlansCmd(m.store, m.cfg.PlanTTLDuration(), 0),
 		m.tickSpinner(),
 	)
 }
@@ -202,6 +209,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				repo.Git = msg.status
 			}
 		}
+		m.noteRefreshDone(msg.gen)
 		return m, nil
 
 	case runnerEventMsg:
@@ -228,6 +236,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case fingerprintMsg:
 		m.fingerprints[msg.modulePath] = msg.fingerprint
+		m.noteRefreshDone(msg.gen)
 		return m, nil
 
 	case logMsg:
@@ -241,7 +250,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, loadLogCmd(msg.id, msg.path)
 
 	case expiredPlansMsg:
-		if msg.n > 0 {
+		if msg.gen != 0 && msg.gen == m.refreshGen {
+			m.refreshExpired = msg.n
+			m.noteRefreshDone(msg.gen)
+		} else if msg.n > 0 {
 			m.status = fmt.Sprintf("expired %d stale plan file(s)", msg.n)
 		}
 		return m, nil
@@ -274,7 +286,7 @@ func (m *Model) updateDiscovery(msg discoveryMsg) (tea.Model, tea.Cmd) {
 	m.repos = msg.repos
 	var cmds []tea.Cmd
 	for _, repo := range m.repos {
-		cmds = append(cmds, gitStatusCmd(m.git, repo.Path))
+		cmds = append(cmds, gitStatusCmd(m.git, repo.Path, 0))
 		for _, mod := range repo.Modules {
 			mod.TFBin = m.cfg.BinFor(repo.Path)
 			if m.ignore[repo.Path] || m.ignore[mod.Path] {
@@ -288,7 +300,7 @@ func (m *Model) updateDiscovery(msg discoveryMsg) (tea.Model, tea.Cmd) {
 			} else if m.runner.EnqueueEnumerate(mod) {
 				m.addTask(runner.KindEnumerate, mod.Path)
 			}
-			cmds = append(cmds, fingerprintCmd(mod))
+			cmds = append(cmds, fingerprintCmd(mod, 0))
 		}
 	}
 	m.reflow()
@@ -490,7 +502,7 @@ func (m *Model) planDone(ev runner.Event) tea.Cmd {
 		m.runs[ev.Key] = ev.Record
 		m.planFiles[ev.Key] = ev.Record.PlanExitCode == tfexec.PlanChanges
 		if mod := m.findModule(ev.Record.ModulePath); mod != nil {
-			return fingerprintCmd(mod)
+			return fingerprintCmd(mod, 0)
 		}
 	}
 	return nil
@@ -1225,18 +1237,44 @@ func (m *Model) toggleIgnore() tea.Cmd {
 }
 
 func (m *Model) refresh() tea.Cmd {
+	m.refreshGen++
+	gen := m.refreshGen
+	m.refreshLeft = 0
+	m.refreshExpired = 0
 	var cmds []tea.Cmd
 	for _, repo := range m.repos {
-		cmds = append(cmds, gitStatusCmd(m.git, repo.Path))
+		cmds = append(cmds, gitStatusCmd(m.git, repo.Path, gen))
+		m.refreshLeft++
 		for _, mod := range repo.Modules {
 			if !m.ignore[repo.Path] && !m.ignore[mod.Path] {
-				cmds = append(cmds, fingerprintCmd(mod))
+				cmds = append(cmds, fingerprintCmd(mod, gen))
+				m.refreshLeft++
 			}
 		}
 	}
-	cmds = append(cmds, expirePlansCmd(m.store, m.cfg.PlanTTLDuration()))
+	cmds = append(cmds, expirePlansCmd(m.store, m.cfg.PlanTTLDuration(), gen))
+	m.refreshLeft++
 	m.status = "refreshing…"
 	return tea.Batch(cmds...)
+}
+
+// noteRefreshDone counts one refresh sub-command's completion toward the
+// current generation, announcing the terminal status once every gitStatus/
+// fingerprint/expiry command fanned out by refresh has reported in. gen 0
+// (non-refresh callers) and stragglers from a superseded generation are
+// no-ops.
+func (m *Model) noteRefreshDone(gen int) {
+	if gen == 0 || gen != m.refreshGen || m.refreshLeft == 0 {
+		return
+	}
+	m.refreshLeft--
+	if m.refreshLeft == 0 {
+		if m.refreshExpired > 0 {
+			m.status = fmt.Sprintf("refreshed — expired %d stale plan file(s)", m.refreshExpired)
+		} else {
+			m.status = "refreshed"
+		}
+	}
 }
 
 // --- apply ---

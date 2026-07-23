@@ -27,6 +27,7 @@ type discoveryMsg struct {
 type gitStatusMsg struct {
 	repoPath string
 	status   domain.GitStatus
+	gen      int // refresh generation; 0 for non-refresh callers
 }
 
 // runnerEventMsg bridges runner.Event into the tea loop.
@@ -43,6 +44,7 @@ type runsLoadedMsg struct {
 type fingerprintMsg struct {
 	modulePath  string
 	fingerprint string
+	gen         int // refresh generation; 0 for non-refresh callers
 }
 
 // logMsg delivers a task log's contents. id is the task id (kind:key) and path
@@ -75,7 +77,10 @@ func loadLogCmd(id, path string) tea.Cmd {
 	}
 }
 
-type expiredPlansMsg struct{ n int }
+type expiredPlansMsg struct {
+	n   int
+	gen int // refresh generation; 0 for non-refresh callers
+}
 
 type savedMsg struct{ err error }
 
@@ -88,9 +93,9 @@ func discoverCmd(roots []string, force bool) tea.Cmd {
 	}
 }
 
-func gitStatusCmd(client gitstatus.Client, repoPath string) tea.Cmd {
+func gitStatusCmd(client gitstatus.Client, repoPath string, gen int) tea.Cmd {
 	return func() tea.Msg {
-		return gitStatusMsg{repoPath: repoPath, status: client.Status(context.Background(), repoPath)}
+		return gitStatusMsg{repoPath: repoPath, status: client.Status(context.Background(), repoPath), gen: gen}
 	}
 }
 
@@ -125,12 +130,12 @@ func loadRunsCmd(store *state.Store, m *domain.Module, workspaces []string) tea.
 	}
 }
 
-func fingerprintCmd(m *domain.Module) tea.Cmd {
+func fingerprintCmd(m *domain.Module, gen int) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		head, _ := gitstatus.Head(ctx, m.Repo.Path)
 		dirty, _ := gitstatus.DirtyHash(ctx, m.Repo.Path, m.RelPath)
-		return fingerprintMsg{modulePath: m.Path, fingerprint: head + "|" + dirty}
+		return fingerprintMsg{modulePath: m.Path, fingerprint: head + "|" + dirty, gen: gen}
 	}
 }
 
@@ -150,10 +155,10 @@ func discardPlanCmd(store *state.Store, modulePath, workspace string) tea.Cmd {
 	}
 }
 
-func expirePlansCmd(store *state.Store, ttl time.Duration) tea.Cmd {
+func expirePlansCmd(store *state.Store, ttl time.Duration, gen int) tea.Cmd {
 	return func() tea.Msg {
 		n, _ := store.ExpirePlans(ttl)
 		_, _ = store.GC()
-		return expiredPlansMsg{n: n}
+		return expiredPlansMsg{n: n, gen: gen}
 	}
 }
