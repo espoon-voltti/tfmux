@@ -158,6 +158,35 @@ func TestPlanPersistsRecordAndPlanFile(t *testing.T) {
 	}
 }
 
+func TestOutputCapturesLog(t *testing.T) {
+	f := newFixture(t, 2)
+	m := f.newModule(t, "mod1")
+	ws := &domain.Workspace{Module: m, Name: "prod"}
+	if !f.runner.EnqueueOutput(ws) {
+		t.Fatal("enqueue refused")
+	}
+	ev := waitTerminal(t, f.runner.Events, KindOutput, 1)[0]
+	if ev.Phase != PhaseDone {
+		t.Fatalf("phase = %v, err = %q", ev.Phase, ev.Err)
+	}
+	logPath, _ := f.store.OutputLogPath(m.Path, "prod")
+	if data, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(data), "hello") {
+		t.Errorf("output log: %q err %v", data, err)
+	}
+}
+
+func TestOutputFailurePropagatesError(t *testing.T) {
+	f := newFixture(t, 2)
+	t.Setenv("TFMUX_FAKE_OUTPUT_EXIT", "1")
+	m := f.newModule(t, "mod1")
+	ws := &domain.Workspace{Module: m, Name: "prod"}
+	f.runner.EnqueueOutput(ws)
+	ev := waitTerminal(t, f.runner.Events, KindOutput, 1)[0]
+	if ev.Phase != PhaseFailed {
+		t.Fatalf("phase = %v, want Failed", ev.Phase)
+	}
+}
+
 func TestCleanPlanDiscardsPlanFile(t *testing.T) {
 	f := newFixture(t, 2)
 	t.Setenv("TFMUX_FAKE_PLAN_EXIT", "0")

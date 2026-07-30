@@ -195,6 +195,14 @@ func (t TF) Plan(ctx context.Context, workspace, outFile string) (Result, error)
 	})
 }
 
+// Output runs `terraform output` for one workspace, returning its plain-text
+// listing. An init-shaped failure triggers one init+retry.
+func (t TF) Output(ctx context.Context, workspace string) (Result, error) {
+	return t.runWithInitRetry(ctx, func() (Result, error) {
+		return t.run(ctx, workspace, "output", "-no-color")
+	})
+}
+
 // Apply applies a saved plan file. Used only for constructing the tmux
 // command line; tfmux itself never runs apply headless.
 func (t TF) ApplyArgs(planFile string) []string {

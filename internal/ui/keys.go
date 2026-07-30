@@ -15,6 +15,7 @@ type keyMap struct {
 	Plan, PlanAll         key.Binding
 	Apply                 key.Binding
 	View                  key.Binding
+	Output                key.Binding
 	Discard               key.Binding
 	Cancel, CancelAll     key.Binding
 	Tasks                 key.Binding
@@ -42,6 +43,7 @@ var keys = keyMap{
 	PlanAll:           key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "plan all")),
 	Apply:             key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "apply (tmux); module/repo: confirm + mass apply")),
 	View:              key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "view log / attach")),
+	Output:            key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "show terraform output")),
 	Discard:           key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "discard plan")),
 	Cancel:            key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "cancel/kill task")),
 	CancelAll:         key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "cancel all queued")),
@@ -67,7 +69,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Left, k.Right, k.CollapseOthers, k.ExpandAll, k.Mark, k.Filter},
-		{k.Plan, k.PlanAll, k.Cancel, k.View, k.Discard},
+		{k.Plan, k.PlanAll, k.Cancel, k.View, k.Output, k.Discard},
 		{k.Apply, k.InitUpgrade, k.Tasks, k.CancelAll},
 		{k.Ignore, k.ShowIgnored, k.Refresh, k.RefreshWorkspaces, k.Rediscover},
 		{k.Help, k.Esc, k.Quit},

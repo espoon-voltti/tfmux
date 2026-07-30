@@ -71,6 +71,7 @@ Run `tfmux` for the TUI, or `tfmux ls [--json]` for a scriptable dump.
 | `x` | cancel/kill task (queued → dropped; running → SIGINT; running apply → confirm, then kill its tmux window) |
 | `T` | task pane: all in-flight tasks; `x` cancel/kill, `X` cancel all queued |
 | `enter` | see what's happening: attach to a live apply (tmux; detach with `C-b d`), else view the plan log — following it live while the plan runs |
+| `o` | show `terraform output` for the workspace |
 | `A` | apply saved plan in tmux — on a module/repo row, confirm then mass-apply every contained workspace whose plan has outstanding changes |
 | `d` | discard saved plan file |
 | `i` / `Z` | toggle ignore / show ignored |

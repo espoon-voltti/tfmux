@@ -239,6 +239,9 @@ func (m *Model) renderWorkspaceStatus(ws *domain.Workspace) string {
 	if ts := m.task(runner.KindApply, key); ts != nil {
 		return m.taskBadge(ts, "applying (tmux)", "apply queued")
 	}
+	if ts := m.task(runner.KindOutput, key); ts != nil {
+		return m.taskBadge(ts, "fetching output", "output queued")
+	}
 	rec := m.runs[key]
 	if rec == nil {
 		return styleDim.Render("never planned")

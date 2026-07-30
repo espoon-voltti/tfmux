@@ -17,6 +17,7 @@
 //	        ├── run.json             RunRecord
 //	        ├── plan.tfplan          0600 — plan files embed secrets
 //	        ├── plan.log             captured plan output
+//	        ├── output.log           captured `terraform output`
 //	        └── apply.exit           written atomically by the tmux wrapper
 //
 // All directories are 0700 and files 0600: plan files contain resolved
@@ -155,6 +156,16 @@ func (s *Store) PlanLogPath(modulePath, workspace string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "plan.log"), nil
+}
+
+// OutputLogPath returns the path for a workspace's captured `terraform
+// output` text.
+func (s *Store) OutputLogPath(modulePath, workspace string) (string, error) {
+	dir, err := s.WorkspaceDir(modulePath, workspace)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "output.log"), nil
 }
 
 func (s *Store) ApplyExitPath(modulePath, workspace string) (string, error) {

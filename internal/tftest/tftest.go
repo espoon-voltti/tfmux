@@ -18,6 +18,7 @@ import (
 //	TFMUX_FAKE_LOG        append "<pid> <pwd> <TF_WORKSPACE> <args>" per call,
 //	                      bracketed by "start"/"end" lines with ns timestamps
 //	TFMUX_FAKE_PLAN_EXIT  exit code for `plan` (default 0)
+//	TFMUX_FAKE_OUTPUT_EXIT exit code for `output` (default 0)
 //	TFMUX_FAKE_NEED_INIT  if set, plan/workspace-list fail with an
 //	                      init-required message until `init` has run
 //	                      (tracked via a sentinel file next to the log)
@@ -58,6 +59,14 @@ case "$1" in
   show)
     cat "${TFMUX_FAKE_SHOW_JSON:?TFMUX_FAKE_SHOW_JSON not set}"
     finish 0
+    ;;
+  output)
+    if [ -n "$TFMUX_FAKE_NEED_INIT" ] && [ ! -f "$TFMUX_FAKE_LOG.initialized" ]; then
+      echo 'Error: Backend initialization required, please run "terraform init"' >&2
+      finish 1
+    fi
+    printf 'greeting = "hello"\n'
+    finish "${TFMUX_FAKE_OUTPUT_EXIT:-0}"
     ;;
   version)
     echo '{"terraform_version":"1.9.9"}'

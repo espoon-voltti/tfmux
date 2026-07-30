@@ -51,6 +51,7 @@ const (
 	KindInit                  // terraform init -upgrade
 	KindPlan                  // plan one workspace
 	KindApply                 // apply one workspace (runs in tmux)
+	KindOutput                // terraform output for one workspace
 )
 
 func (k Kind) String() string {
@@ -63,6 +64,8 @@ func (k Kind) String() string {
 		return "plan"
 	case KindApply:
 		return "apply"
+	case KindOutput:
+		return "output"
 	}
 	return "?"
 }
@@ -73,7 +76,7 @@ func (k Kind) Priority() int {
 	switch k {
 	case KindApply:
 		return 3
-	case KindPlan, KindInit:
+	case KindPlan, KindInit, KindOutput:
 		return 2
 	case KindEnumerate:
 		return 1
@@ -454,6 +457,33 @@ func (r *Runner) EnqueuePlan(w *domain.Workspace) bool {
 			ev.Err = err.Error()
 		}
 		return ev
+	})
+}
+
+// EnqueueOutput runs `terraform output` for one workspace, capturing it to a
+// log the UI can show. Returns false if already in flight.
+func (r *Runner) EnqueueOutput(w *domain.Workspace) bool {
+	m := w.Module
+	return r.enqueue(KindOutput, w.Key(), m.Path, func(ctx context.Context, _ func(Event)) Event {
+		tf := tfexec.TF{Bin: m.TFBin, Dir: m.Path}
+		logPath, logErr := r.store.OutputLogPath(m.Path, w.Name)
+		if logErr == nil {
+			if f, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); ferr == nil {
+				tf.Out = f
+				defer f.Close()
+			}
+		}
+		res, err := tf.Output(ctx, w.Name)
+		if tf.Out == nil && logErr == nil {
+			_ = os.WriteFile(logPath, res.Output, 0o600) // fallback if streaming setup failed
+		}
+		if err != nil {
+			return Event{Err: err.Error()}
+		}
+		if res.ExitCode != 0 {
+			return Event{Err: string(res.Output)}
+		}
+		return Event{}
 	})
 }
 

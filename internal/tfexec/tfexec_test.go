@@ -143,6 +143,38 @@ func TestPlanInitRetryOnce(t *testing.T) {
 	}
 }
 
+func TestOutput(t *testing.T) {
+	tf, logFile := newTF(t)
+	if err := os.MkdirAll(filepath.Join(tf.Dir, ".terraform"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := tf.Output(context.Background(), "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("exit = %d, output:\n%s", res.ExitCode, res.Output)
+	}
+	if !strings.Contains(string(res.Output), "hello") {
+		t.Errorf("output = %q", res.Output)
+	}
+	cs := calls(t, logFile)
+	if len(cs) != 1 || !strings.Contains(cs[0], "output") || !strings.Contains(cs[0], " prod ") {
+		t.Errorf("calls = %v", cs)
+	}
+}
+
+func TestOutputInitsWhenMissing(t *testing.T) {
+	tf, logFile := newTF(t)
+	if _, err := tf.Output(context.Background(), "prod"); err != nil {
+		t.Fatal(err)
+	}
+	cs := calls(t, logFile)
+	if len(cs) != 2 || !strings.Contains(cs[0], "init") || !strings.Contains(cs[1], "output") {
+		t.Errorf("expected init then output, got %v", cs)
+	}
+}
+
 func TestNeedsInit(t *testing.T) {
 	for out, want := range map[string]bool{
 		`Error: Backend initialization required, please run "terraform init"`: true,

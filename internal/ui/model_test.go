@@ -143,6 +143,62 @@ func TestPlanKeyOnRepoQueuesAllWorkspaces(t *testing.T) {
 	drainPlanFinished(t, m, 2)
 }
 
+// drainOutputFinished waits until n queued output jobs completed, so async
+// runner goroutines stop touching the store before t.TempDir() cleanup.
+func drainOutputFinished(t *testing.T, m *Model, n int) {
+	t.Helper()
+	timeout := time.After(15 * time.Second)
+	for n > 0 {
+		select {
+		case ev := <-m.runner.Events:
+			if ev.Kind == runner.KindOutput && ev.Phase.Terminal() {
+				n--
+			}
+		case <-timeout:
+			t.Fatal("timed out draining output events")
+		}
+	}
+}
+
+func TestOutputKeyQueuesCursorWorkspace(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	m.cursor = 2 // workspace row
+	keyPress(m, "o")
+	key := mod.Path + "//prod"
+	if !m.hasTask(runner.KindOutput, key) {
+		t.Error("output not queued for cursor workspace")
+	}
+	drainOutputFinished(t, m, 1)
+}
+
+func TestOutputKeyIgnoredOnNonWorkspaceRow(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	m.cursor = 1 // module row
+	keyPress(m, "o")
+	if countTasks(m, runner.KindOutput) != 0 {
+		t.Error("output queued for a non-workspace row")
+	}
+}
+
+func TestOutputFinishedUpdatesStatusOnFailure(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	m.tasks[runner.TaskID(runner.KindOutput, key)] = &taskState{kind: runner.KindOutput, running: true}
+	m.updateRunnerEvent(runner.Event{
+		Kind: runner.KindOutput, Key: key, ModulePath: mod.Path,
+		Phase: runner.PhaseFailed, Err: "Error: no state",
+	})
+	if m.hasTask(runner.KindOutput, key) {
+		t.Error("output task not cleared")
+	}
+	if !strings.Contains(m.status, "output failed") {
+		t.Errorf("status = %q", m.status)
+	}
+}
+
 func TestPlanFinishedUpdatesStatusAndBadge(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")

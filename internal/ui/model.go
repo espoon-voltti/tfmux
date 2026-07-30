@@ -450,6 +450,8 @@ func (m *Model) taskTerminal(ev runner.Event) tea.Cmd {
 		return m.planDone(ev)
 	case runner.KindApply:
 		return m.applyDone(ev)
+	case runner.KindOutput:
+		return m.outputDone(ev)
 	}
 	return nil
 }
@@ -487,6 +489,16 @@ func (m *Model) initDone(ev runner.Event) tea.Cmd {
 		if mod := m.findModule(ev.ModulePath); mod != nil && len(mod.Workspaces) == 0 && m.runner.EnqueueEnumerate(mod) {
 			m.addTask(runner.KindEnumerate, mod.Path)
 		}
+	}
+	return nil
+}
+
+// outputDone reports a failure; on success the detail viewport (already
+// following the log, if it was open) picks up the final content on its next
+// tick.
+func (m *Model) outputDone(ev runner.Event) tea.Cmd {
+	if ev.Phase == runner.PhaseFailed {
+		m.status = "output failed: " + firstLine(ev.Err)
 	}
 	return nil
 }
@@ -558,6 +570,12 @@ func (m *Model) logPath(kind runner.Kind, key string) (string, error) {
 			return "", fmt.Errorf("bad workspace key %q", key)
 		}
 		return m.store.PlanLogPath(mp, ws)
+	case runner.KindOutput:
+		mp, ws, ok := splitWSKey(key)
+		if !ok {
+			return "", fmt.Errorf("bad workspace key %q", key)
+		}
+		return m.store.OutputLogPath(mp, ws)
 	case runner.KindEnumerate:
 		return m.store.ModuleLogPath(key, "enumerate")
 	case runner.KindInit:
@@ -567,10 +585,10 @@ func (m *Model) logPath(kind runner.Kind, key string) (string, error) {
 }
 
 // detailTitleFor builds the title-bar context for a detail view: the repo, root
-// module and (for plan/apply) workspace the log belongs to.
+// module and (for plan/apply/output) workspace the log belongs to.
 func (m *Model) detailTitleFor(kind runner.Kind, key string) string {
 	switch kind {
-	case runner.KindPlan, runner.KindApply:
+	case runner.KindPlan, runner.KindApply, runner.KindOutput:
 		if mp, ws, ok := splitWSKey(key); ok {
 			if mod := m.findModule(mp); mod != nil {
 				return mod.Repo.Name + " · " + mod.RelPath + " · " + ws
@@ -790,6 +808,10 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case rowModule:
 				return m, m.viewModule(r.mod)
 			}
+		}
+	case key.Matches(msg, keys.Output):
+		if r, ok := m.currentRow(); ok && r.kind == rowWorkspace {
+			return m, m.showOutput(r.ws)
 		}
 	case key.Matches(msg, keys.Discard):
 		if r, ok := m.currentRow(); ok && r.kind == rowWorkspace {
@@ -1416,6 +1438,18 @@ func (m *Model) viewOrAttach(key string) tea.Cmd {
 		return m.attachWindow(win)
 	}
 	return m.openLog(runner.KindPlan, key)
+}
+
+// showOutput runs `terraform output` for a workspace (unless already in
+// flight) and opens the result in the detail viewport, following it live
+// until it completes.
+func (m *Model) showOutput(ws *domain.Workspace) tea.Cmd {
+	key := ws.Key()
+	if m.runner.EnqueueOutput(ws) {
+		m.addTask(runner.KindOutput, key)
+		m.status = "fetching output: " + ws.Name
+	}
+	return m.openLog(runner.KindOutput, key)
 }
 
 // viewModule is the "show me what's happening" action for a module: follow a
