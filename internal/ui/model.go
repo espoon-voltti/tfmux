@@ -1579,7 +1579,7 @@ func (m *Model) View() string {
 	if m.focus == focusFilter {
 		bottom = m.filter.View()
 	} else {
-		bottom = styleHelpLine.Render(m.help.ShortHelpView(keys.ShortHelp()))
+		bottom = styleHelpLine.Render(m.help.ShortHelpView(m.footerHelp()))
 	}
 	statusBar := styleStatusBar.Width(m.width).Render(statusLeft)
 

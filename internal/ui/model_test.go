@@ -245,6 +245,42 @@ func TestStaleBadge(t *testing.T) {
 	}
 }
 
+func TestFooterHelpIsContextSensitive(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+
+	view := m.View() // tree focus, the default
+	if !strings.Contains(view, "plan marked/cursor") {
+		t.Error("tree footer missing plan hint")
+	}
+	if strings.Contains(view, "cancel all queued") {
+		t.Error("tree footer shows a task-pane-only hint")
+	}
+
+	planTask(m, key, true) // give the task pane something to show
+	m.focus = focusTasks
+	view = m.View()
+	if !strings.Contains(view, "cancel/kill task") || !strings.Contains(view, "cancel all queued") {
+		t.Error("task pane footer missing cancel hints")
+	}
+	if strings.Contains(view, "toggle ignore") {
+		t.Error("task pane footer shows a tree-only hint")
+	}
+	if strings.Contains(view, "enter view/attach · x cancel/kill · X cancel all queued · esc/T close") {
+		t.Error("old inline task-pane hint text still rendered in the pane body")
+	}
+
+	m.focus = focusDetail
+	view = m.View()
+	if !strings.Contains(view, "page up") {
+		t.Error("detail footer missing scroll hint")
+	}
+	if strings.Contains(view, "plan marked/cursor") {
+		t.Error("detail footer shows a tree-only hint")
+	}
+}
+
 func TestIgnoreToggleHidesAndPersists(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")

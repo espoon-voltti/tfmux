@@ -158,13 +158,10 @@ func (m *Model) renderTaskPane(height int) string {
 
 	var b strings.Builder
 	if len(tasks) == 0 {
-		b.WriteString(styleDim.Render("  no active tasks"))
-		b.WriteString("\n\n")
-		b.WriteString(styleHelpLine.Render("  esc/T close"))
-		return b.String()
+		return styleDim.Render("  no active tasks")
 	}
 
-	listH := height - 2 // list + blank + footer
+	listH := height
 	if listH < 1 {
 		listH = 1
 	}
@@ -180,8 +177,6 @@ func (m *Model) renderTaskPane(height int) string {
 		b.WriteString(m.renderTaskLine(tasks[i], i == m.taskCursor, m.width))
 		b.WriteByte('\n')
 	}
-	b.WriteString("\n")
-	b.WriteString(styleHelpLine.Render("  enter view/attach · x cancel/kill · X cancel all queued · esc/T close"))
 	return b.String()
 }
 

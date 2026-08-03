@@ -75,3 +75,18 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Help, k.Esc, k.Quit},
 	}
 }
+
+// footerHelp returns the always-visible footer hints for the current pane —
+// context-sensitive so it never advertises a key that wouldn't do anything
+// in this focus. focusFilter isn't handled here: View() replaces the footer
+// with the filter input itself before this is ever called.
+func (m *Model) footerHelp() []key.Binding {
+	switch m.focus {
+	case focusDetail:
+		return []key.Binding{keys.Up, keys.Down, keys.PageUp, keys.PageDown, keys.Esc}
+	case focusTasks:
+		return []key.Binding{keys.Up, keys.Down, keys.View, keys.Cancel, keys.CancelAll, keys.Esc}
+	default:
+		return keys.ShortHelp()
+	}
+}
