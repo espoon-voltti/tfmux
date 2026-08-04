@@ -222,7 +222,7 @@ func TestSameModuleSerializedCrossModuleParallel(t *testing.T) {
 	}
 	open := map[string]int{} // module dir -> currently running plans
 	sawCrossModuleOverlap := false
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 5 || fields[4] != "plan" {
 			continue

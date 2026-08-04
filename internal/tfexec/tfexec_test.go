@@ -30,7 +30,7 @@ func calls(t *testing.T, logFile string) []string {
 		t.Fatal(err)
 	}
 	var out []string
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		if strings.HasPrefix(line, "start ") {
 			out = append(out, line)
 		}

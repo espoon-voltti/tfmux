@@ -110,7 +110,7 @@ func TestModuleLockSerializesAcrossRunners(t *testing.T) {
 		t.Fatal(err)
 	}
 	depth := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		switch {
 		case strings.HasPrefix(line, "start"):
 			depth++

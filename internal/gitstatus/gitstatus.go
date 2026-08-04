@@ -56,7 +56,7 @@ func (c CLI) Status(ctx context.Context, repoPath string) domain.GitStatus {
 // Any non-# line is a changed/untracked/unmerged entry => dirty.
 func Parse(out string) domain.GitStatus {
 	var st domain.GitStatus
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if line == "" {
 			continue
 		}

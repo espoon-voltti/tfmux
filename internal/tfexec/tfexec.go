@@ -169,7 +169,7 @@ func (t TF) WorkspaceList(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("workspace list in %s failed:\n%s", t.Dir, res.Output)
 	}
 	var workspaces []string
-	for _, line := range strings.Split(string(res.Output), "\n") {
+	for line := range strings.SplitSeq(string(res.Output), "\n") {
 		ws := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "*"))
 		if ws != "" {
 			workspaces = append(workspaces, ws)
