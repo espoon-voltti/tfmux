@@ -744,6 +744,10 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case key.Matches(msg, keys.Quit):
+		if m.showHelp {
+			m.showHelp = false
+			return m, nil
+		}
 		if m.anyTask(runner.KindPlan) {
 			m.confirmQuit = true
 			return m, nil

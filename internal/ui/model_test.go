@@ -69,6 +69,8 @@ func keyPress(m *Model, k string) tea.Cmd {
 		msg = tea.KeyMsg{Type: tea.KeyEnter}
 	case " ":
 		msg = tea.KeyMsg{Type: tea.KeySpace}
+	case "esc":
+		msg = tea.KeyMsg{Type: tea.KeyEsc}
 	default:
 		msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 	}
@@ -491,6 +493,49 @@ func TestQuitConfirmWhilePlanning(t *testing.T) {
 	cmd := keyPress(m, "y")
 	if cmd == nil {
 		t.Fatal("y should quit")
+	}
+}
+
+func TestQAndEscAreInterchangeableForBack(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+
+	for _, back := range []string{"q", "esc"} {
+		planTask(m, key, true)
+		m.focus = focusTasks
+		if cmd := keyPress(m, back); cmd != nil {
+			t.Errorf("%q in task pane should not quit", back)
+		}
+		if m.focus != focusTree {
+			t.Errorf("%q in task pane should return to tree, got focus %v", back, m.focus)
+		}
+
+		m.focus = focusDetail
+		if cmd := keyPress(m, back); cmd != nil {
+			t.Errorf("%q in detail view should not quit", back)
+		}
+		if m.focus != focusTree {
+			t.Errorf("%q in detail view should return to tree, got focus %v", back, m.focus)
+		}
+	}
+}
+
+func TestQClosesHelpInsteadOfQuitting(t *testing.T) {
+	m, _ := fixtureModel(t)
+	keyPress(m, "?")
+	if !m.showHelp {
+		t.Fatal("expected help overlay to open")
+	}
+	cmd := keyPress(m, "q")
+	if cmd != nil {
+		t.Fatal("q should close the help overlay, not quit")
+	}
+	if m.showHelp {
+		t.Error("expected help overlay to close")
+	}
+	if m.confirmQuit {
+		t.Error("q should not trigger quit confirmation while help is open")
 	}
 }
 

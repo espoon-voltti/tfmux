@@ -48,7 +48,7 @@ func (m *Model) clampTaskCursor() {
 // updateTaskKey handles input while the task pane is focused.
 func (m *Model) updateTaskKey(msg tea.KeyMsg) tea.Cmd {
 	switch {
-	case key.Matches(msg, keys.Esc), key.Matches(msg, keys.Tasks):
+	case key.Matches(msg, keys.Esc), key.Matches(msg, keys.Tasks), key.Matches(msg, keys.Quit):
 		m.focus = focusTree
 	case key.Matches(msg, keys.Up):
 		if m.taskCursor > 0 {
