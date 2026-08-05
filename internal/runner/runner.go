@@ -607,6 +607,9 @@ func (r *Runner) plan(ctx context.Context, tf tfexec.TF, m *domain.Module, works
 		return nil, err
 	}
 	rec.PlanExitCode = res.ExitCode
+	if res.ExitCode == tfexec.PlanError {
+		rec.PlanErrorKind = string(tfexec.ClassifyPlanError(res.Output))
+	}
 	_ = os.Chmod(planFile, 0o600) // terraform writes 0644 by default
 
 	// Best-effort enrichment; failures here must not fail the plan.

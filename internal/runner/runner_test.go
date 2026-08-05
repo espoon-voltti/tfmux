@@ -202,6 +202,27 @@ func TestCleanPlanDiscardsPlanFile(t *testing.T) {
 	}
 }
 
+func TestPlanErrorClassifiesKnownSignatures(t *testing.T) {
+	for stderr, want := range map[string]string{
+		"Error: Inconsistent dependency lock file":  "init -upgrade required",
+		"Error: Error acquiring the state lock":     "state locked",
+		"Error: something else went wrong entirely": "",
+	} {
+		f := newFixture(t, 2)
+		t.Setenv("TFMUX_FAKE_PLAN_STDERR", stderr)
+		m := f.newModule(t, "mod1")
+		ws := &domain.Workspace{Module: m, Name: "prod"}
+		f.runner.EnqueuePlan(ws)
+		ev := waitTerminal(t, f.runner.Events, KindPlan, 1)[0]
+		if ev.Record.PlanExitCode != 1 {
+			t.Fatalf("stderr %q: exit = %d", stderr, ev.Record.PlanExitCode)
+		}
+		if ev.Record.PlanErrorKind != want {
+			t.Errorf("stderr %q: PlanErrorKind = %q, want %q", stderr, ev.Record.PlanErrorKind, want)
+		}
+	}
+}
+
 // TestSameModuleSerializedCrossModuleParallel reads the stub's append-only
 // call log: the start/end line order proves same-module jobs never overlap,
 // and that cross-module jobs do (a mod2 start appears before mod1 finishes).

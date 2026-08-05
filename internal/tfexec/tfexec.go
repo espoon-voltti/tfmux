@@ -185,6 +185,46 @@ const (
 	PlanChanges = 2
 )
 
+// PlanErrorKind labels a well-known plan failure signature so the UI can call
+// it out specifically instead of a bare "plan error". The zero value means no
+// known signature matched.
+type PlanErrorKind string
+
+const (
+	PlanErrorUpgradeNeeded PlanErrorKind = "init -upgrade required"
+	PlanErrorStateLocked   PlanErrorKind = "state locked"
+)
+
+// upgradeSignatures mark errors that only `terraform init -upgrade` (not a
+// plain init) can fix: the dependency lock file no longer matches the
+// configuration's provider requirements.
+var upgradeSignatures = []string{
+	`inconsistent dependency lock file`,
+}
+
+// lockSignatures mark errors caused by another process holding the state
+// lock.
+var lockSignatures = []string{
+	`error acquiring the state lock`,
+}
+
+// ClassifyPlanError inspects a failed plan's combined output for well-known
+// failure signatures, returning "" when none match.
+func ClassifyPlanError(output []byte) PlanErrorKind {
+	s := strings.ToLower(string(output))
+	for _, sig := range lockSignatures {
+		if strings.Contains(s, sig) {
+			return PlanErrorStateLocked
+		}
+	}
+	for _, sig := range upgradeSignatures {
+		if strings.Contains(s, sig) {
+			return PlanErrorUpgradeNeeded
+		}
+	}
+	return ""
+}
+
 // Plan runs terraform plan for one workspace, writing the plan to outFile.
 // The returned ExitCode follows -detailed-exitcode semantics; an init-shaped
 // failure triggers one init+retry.

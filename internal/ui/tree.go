@@ -249,7 +249,11 @@ func (m *Model) renderWorkspaceStatus(ws *domain.Workspace) string {
 	var parts []string
 	switch rec.PlanExitCode {
 	case tfexec.PlanError:
-		parts = append(parts, styleError.Render("✗ plan error"))
+		msg := "✗ plan error"
+		if rec.PlanErrorKind != "" {
+			msg += " (" + rec.PlanErrorKind + ")"
+		}
+		parts = append(parts, styleError.Render(msg))
 	case tfexec.PlanClean:
 		parts = append(parts, styleGood.Render("✓ clean"))
 	case tfexec.PlanChanges:

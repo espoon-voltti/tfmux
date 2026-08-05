@@ -69,6 +69,11 @@ type RunRecord struct {
 	PlanFinished time.Time `json:"plan_finished"`
 	PlanExitCode int       `json:"plan_exit_code"` // 0 clean, 1 error, 2 changes
 
+	// PlanErrorKind names a well-known failure signature (see
+	// tfexec.ClassifyPlanError) when PlanExitCode is tfexec.PlanError; empty
+	// for a generic failure or any other exit code.
+	PlanErrorKind string `json:"plan_error_kind,omitempty"`
+
 	Summary ChangeSummary `json:"summary"`
 
 	GitHead      string `json:"git_head,omitempty"`

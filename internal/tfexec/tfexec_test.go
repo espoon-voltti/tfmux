@@ -189,6 +189,19 @@ func TestNeedsInit(t *testing.T) {
 	}
 }
 
+func TestClassifyPlanError(t *testing.T) {
+	for out, want := range map[string]PlanErrorKind{
+		`Error: Inconsistent dependency lock file`:                       PlanErrorUpgradeNeeded,
+		"Error: Error acquiring the state lock\n\nLock Info:\n  ID: abc": PlanErrorStateLocked,
+		`Error: Invalid resource type`:                                   "",
+		``:                                                               "",
+	} {
+		if got := ClassifyPlanError([]byte(out)); got != want {
+			t.Errorf("ClassifyPlanError(%q) = %q, want %q", out, got, want)
+		}
+	}
+}
+
 func TestVersion(t *testing.T) {
 	tf, _ := newTF(t)
 	v, err := tf.Version(context.Background())

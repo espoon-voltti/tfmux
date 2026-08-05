@@ -245,6 +245,20 @@ func TestStaleBadge(t *testing.T) {
 	}
 }
 
+func TestPlanErrorKindShownInStatus(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	m.runs[key] = &state.RunRecord{
+		ModulePath: mod.Path, Workspace: "prod",
+		PlanFinished: time.Now(), PlanExitCode: tfexec.PlanError,
+		PlanErrorKind: string(tfexec.PlanErrorStateLocked),
+	}
+	if !strings.Contains(m.View(), "plan error (state locked)") {
+		t.Error("state-locked plan error kind not rendered")
+	}
+}
+
 func TestFooterHelpIsContextSensitive(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")

@@ -18,6 +18,9 @@ import (
 //	TFMUX_FAKE_LOG        append "<pid> <pwd> <TF_WORKSPACE> <args>" per call,
 //	                      bracketed by "start"/"end" lines with ns timestamps
 //	TFMUX_FAKE_PLAN_EXIT  exit code for `plan` (default 0)
+//	TFMUX_FAKE_PLAN_STDERR text `plan` writes to stderr instead of planning
+//	                      normally (exit code defaults to 1 when set);
+//	                      simulates specific failures like a state lock
 //	TFMUX_FAKE_OUTPUT_EXIT exit code for `output` (default 0)
 //	TFMUX_FAKE_NEED_INIT  if set, plan/workspace-list fail with an
 //	                      init-required message until `init` has run
@@ -49,6 +52,10 @@ case "$1" in
     if [ -n "$TFMUX_FAKE_NEED_INIT" ] && [ ! -f "$TFMUX_FAKE_LOG.initialized" ]; then
       echo 'Error: Backend initialization required, please run "terraform init"' >&2
       finish 1
+    fi
+    if [ -n "$TFMUX_FAKE_PLAN_STDERR" ]; then
+      echo "$TFMUX_FAKE_PLAN_STDERR" >&2
+      finish "${TFMUX_FAKE_PLAN_EXIT:-1}"
     fi
     out=""
     for a in "$@"; do case "$a" in -out=*) out="${a#-out=}";; esac; done
