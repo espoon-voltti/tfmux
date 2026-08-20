@@ -197,7 +197,7 @@ func (m *Model) renderModuleRow(mod *domain.Module) string {
 	s := fmt.Sprintf("  %s %s  ", marker, styleModule.Render(mod.RelPath))
 	switch {
 	case m.task(runner.KindInit, mod.Path) != nil:
-		s += m.taskBadge(m.task(runner.KindInit, mod.Path), "init -upgrade", "init queued")
+		s += m.taskBadge(m.task(runner.KindInit, mod.Path), "init running", "init queued")
 	case m.task(runner.KindEnumerate, mod.Path) != nil:
 		s += m.taskBadge(m.task(runner.KindEnumerate, mod.Path), "listing workspaces", "workspaces queued")
 	case mod.WorkspaceState == domain.WorkspacesUnknown:

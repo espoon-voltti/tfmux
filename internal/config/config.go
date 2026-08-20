@@ -16,6 +16,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/espoon-voltti/tfmux/internal/paths"
+	"github.com/espoon-voltti/tfmux/internal/tfexec"
 )
 
 // RepoConfig holds per-repo overrides, keyed by repo path in the TOML.
@@ -32,6 +33,12 @@ type Config struct {
 	TmuxSession  string                `toml:"tmux_session"`
 	PlanTTL      duration              `toml:"plan_ttl"`
 	Repos        map[string]RepoConfig `toml:"repos"`
+
+	// InitParallelism caps concurrent `terraform init` invocations across all
+	// modules. 0 (the default) auto-detects: capped to 1 when a Terraform or
+	// OpenTofu plugin cache is configured (see tfexec.PluginCacheDirConfigured),
+	// unlimited otherwise. A positive value overrides detection.
+	InitParallelism int `toml:"init_parallelism"`
 }
 
 // duration wraps time.Duration so TOML strings like "24h" round-trip.
@@ -52,6 +59,19 @@ func (d duration) MarshalText() ([]byte, error) {
 
 // PlanTTLDuration returns the plan TTL as a time.Duration.
 func (c *Config) PlanTTLDuration() time.Duration { return time.Duration(c.PlanTTL) }
+
+// EffectiveInitParallelism resolves the concurrent-init cap: an explicit
+// InitParallelism always wins, otherwise it's auto-detected from the
+// terraform/tofu CLI config. 0 means unlimited.
+func (c *Config) EffectiveInitParallelism() int {
+	if c.InitParallelism > 0 {
+		return c.InitParallelism
+	}
+	if tfexec.PluginCacheDirConfigured() {
+		return 1
+	}
+	return 0
+}
 
 // Default returns the configuration used when no config file exists.
 func Default() *Config {
@@ -106,6 +126,9 @@ func (c *Config) normalize() error {
 	}
 	if c.PlanTTLDuration() <= 0 {
 		return errors.New("plan_ttl must be positive")
+	}
+	if c.InitParallelism < 0 {
+		return fmt.Errorf("init_parallelism must be >= 0, got %d", c.InitParallelism)
 	}
 	for i, r := range c.Roots {
 		expanded, err := paths.ExpandHome(r)

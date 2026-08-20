@@ -128,7 +128,7 @@ func NewModel(cfg *config.Config, store *state.Store) *Model {
 	return &Model{
 		cfg:          cfg,
 		store:        store,
-		runner:       runner.New(cfg.Parallelism, store, tmux),
+		runner:       runner.New(cfg.Parallelism, cfg.EffectiveInitParallelism(), store, tmux),
 		git:          gitstatus.CLI{},
 		tmux:         tmux,
 		tmuxOK:       tmuxctl.Available(),
@@ -426,7 +426,7 @@ func (m *Model) updateRunnerEvent(ev runner.Event) tea.Cmd {
 func (m *Model) taskRunning(ev runner.Event, ts *taskState) tea.Cmd {
 	switch ev.Kind {
 	case runner.KindInit:
-		m.status = "init -upgrade running…"
+		m.status = "init running…"
 	case runner.KindApply:
 		if ev.WindowID != "" {
 			ts.windowID = ev.WindowID
@@ -479,12 +479,12 @@ func (m *Model) enumerateDone(ev runner.Event) tea.Cmd {
 func (m *Model) initDone(ev runner.Event) tea.Cmd {
 	switch ev.Phase {
 	case runner.PhaseFailed:
-		m.status = "init -upgrade failed: " + firstLine(ev.Err)
+		m.status = "init failed: " + firstLine(ev.Err)
 	case runner.PhaseDone:
-		m.status = "init -upgrade done"
-		// Enumerating hits the backend (slow/rate-limited), and init -upgrade
-		// doesn't change the workspace list — so only auto-enumerate when the
-		// module has no workspaces yet (e.g. its first init). Otherwise the user
+		m.status = "init done"
+		// Enumerating hits the backend (slow/rate-limited), and init doesn't
+		// change the workspace list — so only auto-enumerate when the module
+		// has no workspaces yet (e.g. its first init). Otherwise the user
 		// refreshes explicitly (w / R).
 		if mod := m.findModule(ev.ModulePath); mod != nil && len(mod.Workspaces) == 0 && m.runner.EnqueueEnumerate(mod) {
 			m.addTask(runner.KindEnumerate, mod.Path)

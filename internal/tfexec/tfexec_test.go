@@ -44,9 +44,12 @@ func TestWorkspaceList(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(tf.Dir, ".terraform"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, err := tf.WorkspaceList(context.Background())
+	res, got, err := tf.WorkspaceList(context.Background())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("exit = %d, output:\n%s", res.ExitCode, res.Output)
 	}
 	want := []string{"default", "prod", "staging"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
@@ -58,36 +61,26 @@ func TestWorkspaceList(t *testing.T) {
 	}
 }
 
-func TestWorkspaceListInitsWhenMissing(t *testing.T) {
-	tf, logFile := newTF(t)
-	if _, err := tf.WorkspaceList(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	cs := calls(t, logFile)
-	if len(cs) != 2 || !strings.Contains(cs[0], "init") || !strings.Contains(cs[1], "workspace list") {
-		t.Errorf("expected init then workspace list, got %v", cs)
-	}
-}
-
-// Regression: init output must not be parsed as workspace names when workspace
-// list triggers an init retry.
-func TestWorkspaceListInitRetryNoGarbage(t *testing.T) {
-	tf, logFile := newTF(t)
+// Regression: an init-shaped failure must surface via ExitCode/Output, not
+// be misread as an empty workspace list.
+func TestWorkspaceListNeedsInit(t *testing.T) {
+	tf, _ := newTF(t)
 	tf.Env = append(tf.Env, "TFMUX_FAKE_NEED_INIT=1")
 	if err := os.MkdirAll(filepath.Join(tf.Dir, ".terraform"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, err := tf.WorkspaceList(context.Background())
+	res, got, err := tf.WorkspaceList(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"default", "prod", "staging"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("workspaces = %v, want %v", got, want)
+	if res.ExitCode == 0 {
+		t.Fatalf("expected a failing exit code, got 0 with output:\n%s", res.Output)
 	}
-	cs := calls(t, logFile)
-	if len(cs) != 3 {
-		t.Fatalf("expected workspace list, init, workspace list — got %v", cs)
+	if got != nil {
+		t.Errorf("workspaces = %v, want nil", got)
+	}
+	if !NeedsInit(res.Output) {
+		t.Errorf("output did not look init-shaped: %q", res.Output)
 	}
 }
 
@@ -119,11 +112,11 @@ func TestPlanWorkspaceEnvAndExitCodes(t *testing.T) {
 	}
 }
 
-func TestPlanInitRetryOnce(t *testing.T) {
+// Regression: Plan runs exactly once and reports an init-shaped failure
+// as-is — retrying belongs to the caller (see internal/runner), not tfexec.
+func TestPlanNeedsInitNoAutoRetry(t *testing.T) {
 	tf, logFile := newTF(t)
 	tf.Env = append(tf.Env, "TFMUX_FAKE_NEED_INIT=1")
-	// fake an existing .terraform so the cheap pre-check passes and the
-	// stderr-sniffing path is exercised
 	if err := os.MkdirAll(filepath.Join(tf.Dir, ".terraform"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -131,15 +124,15 @@ func TestPlanInitRetryOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.ExitCode != 0 {
-		t.Errorf("exit = %d after init retry, output:\n%s", res.ExitCode, res.Output)
+	if res.ExitCode == 0 {
+		t.Fatalf("expected a failing exit code, got 0 with output:\n%s", res.Output)
+	}
+	if !NeedsInit(res.Output) {
+		t.Errorf("output did not look init-shaped: %q", res.Output)
 	}
 	cs := calls(t, logFile)
-	if len(cs) != 3 {
-		t.Fatalf("expected plan, init, plan — got %v", cs)
-	}
-	if !strings.Contains(cs[0], "plan") || !strings.Contains(cs[1], "init") || !strings.Contains(cs[2], "plan") {
-		t.Errorf("wrong sequence: %v", cs)
+	if len(cs) != 1 {
+		t.Fatalf("expected exactly one plan call, got %v", cs)
 	}
 }
 
@@ -164,14 +157,24 @@ func TestOutput(t *testing.T) {
 	}
 }
 
-func TestOutputInitsWhenMissing(t *testing.T) {
+// Regression: Output on an uninitialized module fails outright — it's the
+// caller's job to check Initialized() and init first (see internal/runner).
+func TestOutputFailsWhenMissingInit(t *testing.T) {
 	tf, logFile := newTF(t)
-	if _, err := tf.Output(context.Background(), "prod"); err != nil {
+	tf.Env = append(tf.Env, "TFMUX_FAKE_NEED_INIT=1")
+	res, err := tf.Output(context.Background(), "prod")
+	if err != nil {
 		t.Fatal(err)
 	}
+	if res.ExitCode == 0 {
+		t.Fatalf("expected a failing exit code, got 0 with output:\n%s", res.Output)
+	}
+	if !NeedsInit(res.Output) {
+		t.Errorf("output did not look init-shaped: %q", res.Output)
+	}
 	cs := calls(t, logFile)
-	if len(cs) != 2 || !strings.Contains(cs[0], "init") || !strings.Contains(cs[1], "output") {
-		t.Errorf("expected init then output, got %v", cs)
+	if len(cs) != 1 || !strings.Contains(cs[0], "output") {
+		t.Errorf("expected exactly one output call, got %v", cs)
 	}
 }
 

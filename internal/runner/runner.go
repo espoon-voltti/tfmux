@@ -20,6 +20,14 @@
 //     applies preempt plans, plans preempt enumerations
 //   - workspaces are selected via TF_WORKSPACE inside tfexec, never
 //     `workspace select`, so cross-workspace jobs don't race
+//   - init is always a first-class KindInit task, never run inline by another
+//     task: enumerate/plan/output discover they need one (module not
+//     initialized, or a run failed with an init-shaped error), enqueue a
+//     KindInit task, and re-enqueue themselves — see deferForInit. This keeps
+//     a task from holding its slot/module lock while merely waiting for init,
+//     and lets a global cap (config `init_parallelism`) serialize init across
+//     modules when a shared Terraform/OpenTofu plugin cache requires it,
+//     without touching `parallelism`.
 //
 // Applies run in a tmux window (they're interactive, long-running, and must
 // outlive tfmux) but still occupy a pool slot: the task launches the window,
@@ -116,6 +124,13 @@ type Event struct {
 	ApplyExit  *int             // KindApply, PhaseDone (exit code; nil when aborted)
 	Aborted    bool             // KindApply, PhaseDone (window vanished, outcome unknown)
 	Err        string           // PhaseFailed
+
+	// requeueFn, when set, means the task discovered it needs init instead of
+	// finishing: execute() runs it (after releasing this task's slot/module/
+	// inflight bookkeeping) instead of emitting a terminal event, so the UI
+	// never sees a spurious failure for what's really a deferred retry. See
+	// deferForInit.
+	requeueFn func()
 }
 
 // TaskID is a task's stable identity: kind-scoped, so a plan and an apply for
@@ -156,6 +171,8 @@ type Runner struct {
 	cond        *sync.Cond
 	parallelism int
 	active      int
+	initLimit   int // max concurrent KindInit tasks; 0 = unlimited
+	activeInits int
 	busyModule  map[string]bool  // module path -> a task is running there
 	inflight    map[string]*task // id -> task (queued or running)
 	ready       []*task
@@ -168,7 +185,8 @@ type Runner struct {
 	pending  []Event
 }
 
-func New(parallelism int, store *state.Store, tmux *tmuxctl.Ctl) *Runner {
+// initParallelism caps concurrent KindInit tasks; 0 means unlimited.
+func New(parallelism, initParallelism int, store *state.Store, tmux *tmuxctl.Ctl) *Runner {
 	if parallelism < 1 {
 		parallelism = 1
 	}
@@ -177,6 +195,7 @@ func New(parallelism int, store *state.Store, tmux *tmuxctl.Ctl) *Runner {
 		store:       store,
 		tmux:        tmux,
 		parallelism: parallelism,
+		initLimit:   initParallelism,
 		busyModule:  map[string]bool{},
 		inflight:    map[string]*task{},
 	}
@@ -199,6 +218,9 @@ func (r *Runner) schedule() {
 				break
 			}
 			r.active++
+			if t.kind == KindInit {
+				r.activeInits++
+			}
 			r.busyModule[t.modulePath] = true
 			t.started = true
 			r.mu.Unlock()
@@ -218,6 +240,9 @@ func (r *Runner) pickLocked() *task {
 	best, bi := -1, -1
 	for i, t := range r.ready {
 		if r.busyModule[t.modulePath] {
+			continue
+		}
+		if t.kind == KindInit && r.initLimit > 0 && r.activeInits >= r.initLimit {
 			continue
 		}
 		if best < 0 {
@@ -240,15 +265,22 @@ func (r *Runner) pickLocked() *task {
 
 func (r *Runner) execute(t *task) {
 	out := r.runJob(t)
-	out.Kind, out.Key, out.ModulePath = t.kind, t.key, t.modulePath
 
 	r.mu.Lock()
 	r.active--
+	if t.kind == KindInit {
+		r.activeInits--
+	}
 	delete(r.busyModule, t.modulePath)
 	delete(r.inflight, t.id())
 	r.cond.Signal()
 	r.mu.Unlock()
 
+	if out.requeueFn != nil {
+		out.requeueFn()
+		return
+	}
+	out.Kind, out.Key, out.ModulePath = t.kind, t.key, t.modulePath
 	r.emit(out)
 }
 
@@ -278,6 +310,8 @@ func (r *Runner) runJob(t *task) Event {
 	switch {
 	case t.ctx.Err() != nil:
 		return Event{Phase: PhaseCanceled}
+	case out.requeueFn != nil:
+		return out // not terminal — execute() runs requeueFn instead of emitting
 	case out.Err != "":
 		out.Phase = PhaseFailed
 	default:
@@ -396,15 +430,29 @@ func (r *Runner) pump() {
 
 // EnqueueEnumerate lists the module's workspaces (lazily initializing) and
 // caches the result. Returns false if already in flight.
-func (r *Runner) EnqueueEnumerate(m *domain.Module) bool {
+func (r *Runner) EnqueueEnumerate(m *domain.Module) bool { return r.enqueueEnumerate(m, false) }
+
+func (r *Runner) enqueueEnumerate(m *domain.Module, afterInit bool) bool {
 	return r.enqueue(KindEnumerate, m.Path, m.Path, func(ctx context.Context, _ func(Event)) Event {
 		tf := tfexec.TF{Bin: m.TFBin, Dir: m.Path, Out: r.taskLog(m.Path, "enumerate")}
 		if c, ok := tf.Out.(io.Closer); ok {
 			defer c.Close()
 		}
-		workspaces, err := tf.WorkspaceList(ctx)
+		if !tf.Initialized() {
+			if afterInit {
+				return Event{Err: "workspace list: module not initialized (a preceding terraform init failed)"}
+			}
+			return r.deferForInit(m, func() { r.enqueueEnumerate(m, true) })
+		}
+		res, workspaces, err := tf.WorkspaceList(ctx)
 		if err != nil {
 			return Event{Err: err.Error()}
+		}
+		if res.ExitCode != 0 {
+			if !afterInit && tfexec.NeedsInit(res.Output) {
+				return r.deferForInit(m, func() { r.enqueueEnumerate(m, true) })
+			}
+			return Event{Err: fmt.Sprintf("workspace list in %s failed:\n%s", m.Path, res.Output)}
 		}
 		// cache the (slow, rate-limited) enumeration for next launch
 		_ = r.store.SaveWorkspaces(m.Path, workspaces, time.Now())
@@ -428,13 +476,22 @@ func (r *Runner) taskLog(modulePath, name string) io.Writer {
 
 // EnqueueInitUpgrade runs `terraform init -upgrade` (explicit user action — it
 // mutates .terraform.lock.hcl). Returns false if already in flight.
-func (r *Runner) EnqueueInitUpgrade(m *domain.Module) bool {
+func (r *Runner) EnqueueInitUpgrade(m *domain.Module) bool { return r.enqueueInit(m, true) }
+
+// enqueueInit runs terraform init, either the explicit user-triggered upgrade
+// or a plain lazy init a Plan/Output/Enumerate task deferred to. Both share
+// TaskID(KindInit, m.Path): if a lazy init for the module is already queued
+// the instant an explicit upgrade is requested, the upgrade request is
+// dropped (the queued plain init wins) — a rare, harmless race; it never
+// produces an unintended upgrade, and pressing `I` again after it completes
+// fixes it.
+func (r *Runner) enqueueInit(m *domain.Module, upgrade bool) bool {
 	return r.enqueue(KindInit, m.Path, m.Path, func(ctx context.Context, _ func(Event)) Event {
 		tf := tfexec.TF{Bin: m.TFBin, Dir: m.Path, Out: r.taskLog(m.Path, "init")}
 		if c, ok := tf.Out.(io.Closer); ok {
 			defer c.Close()
 		}
-		res, err := tf.Init(ctx, true)
+		res, err := tf.Init(ctx, upgrade)
 		if err != nil {
 			return Event{Err: err.Error()}
 		}
@@ -445,13 +502,44 @@ func (r *Runner) EnqueueInitUpgrade(m *domain.Module) bool {
 	})
 }
 
+// deferForInit ends the current task without a terminal event: it ensures a
+// plain init is queued for m (a no-op if one is already in flight, including
+// an explicit upgrade) and re-enqueues the dependent task via retry.
+// execute() runs retry once this task's slot/module/inflight bookkeeping is
+// cleared, so the re-enqueue never collides with this task's own still-
+// registered id.
+//
+// Ordering is guaranteed without extra plumbing: enqueueInit is called before
+// retry, so the init task always gets a strictly lower seq (enqueue
+// increments seq under r.mu); KindInit's priority is >= every kind that can
+// defer to it, so pickLocked always picks the init first when both are ready
+// for the same module, and once picked, busyModule excludes the dependent
+// task until the init's execute() clears it.
+func (r *Runner) deferForInit(m *domain.Module, retry func()) Event {
+	return Event{requeueFn: func() {
+		r.enqueueInit(m, false)
+		retry()
+	}}
+}
+
 // EnqueuePlan plans one workspace, persisting the RunRecord + plan file + log.
 // Returns false if already in flight.
-func (r *Runner) EnqueuePlan(w *domain.Workspace) bool {
+func (r *Runner) EnqueuePlan(w *domain.Workspace) bool { return r.enqueuePlan(w, false) }
+
+func (r *Runner) enqueuePlan(w *domain.Workspace, afterInit bool) bool {
 	m := w.Module
 	tf := tfexec.TF{Bin: m.TFBin, Dir: m.Path}
 	return r.enqueue(KindPlan, w.Key(), m.Path, func(ctx context.Context, _ func(Event)) Event {
-		rec, err := r.plan(ctx, tf, m, w.Name)
+		if !tf.Initialized() {
+			if afterInit {
+				return Event{Err: "plan: module not initialized (a preceding terraform init failed)"}
+			}
+			return r.deferForInit(m, func() { r.enqueuePlan(w, true) })
+		}
+		rec, needsInit, err := r.plan(ctx, tf, m, w.Name)
+		if !afterInit && needsInit {
+			return r.deferForInit(m, func() { r.enqueuePlan(w, true) })
+		}
 		ev := Event{Record: rec}
 		if err != nil {
 			ev.Err = err.Error()
@@ -462,10 +550,18 @@ func (r *Runner) EnqueuePlan(w *domain.Workspace) bool {
 
 // EnqueueOutput runs `terraform output` for one workspace, capturing it to a
 // log the UI can show. Returns false if already in flight.
-func (r *Runner) EnqueueOutput(w *domain.Workspace) bool {
+func (r *Runner) EnqueueOutput(w *domain.Workspace) bool { return r.enqueueOutput(w, false) }
+
+func (r *Runner) enqueueOutput(w *domain.Workspace, afterInit bool) bool {
 	m := w.Module
 	return r.enqueue(KindOutput, w.Key(), m.Path, func(ctx context.Context, _ func(Event)) Event {
 		tf := tfexec.TF{Bin: m.TFBin, Dir: m.Path}
+		if !tf.Initialized() {
+			if afterInit {
+				return Event{Err: "output: module not initialized (a preceding terraform init failed)"}
+			}
+			return r.deferForInit(m, func() { r.enqueueOutput(w, true) })
+		}
 		logPath, logErr := r.store.OutputLogPath(m.Path, w.Name)
 		if logErr == nil {
 			if f, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); ferr == nil {
@@ -481,6 +577,9 @@ func (r *Runner) EnqueueOutput(w *domain.Workspace) bool {
 			return Event{Err: err.Error()}
 		}
 		if res.ExitCode != 0 {
+			if !afterInit && tfexec.NeedsInit(res.Output) {
+				return r.deferForInit(m, func() { r.enqueueOutput(w, true) })
+			}
 			return Event{Err: string(res.Output)}
 		}
 		return Event{}
@@ -574,12 +673,15 @@ func parseExit(b []byte) int {
 	return code
 }
 
-func (r *Runner) plan(ctx context.Context, tf tfexec.TF, m *domain.Module, workspace string) (*state.RunRecord, error) {
+// plan runs terraform plan for one workspace. The returned needsInit reports
+// whether the run failed with an init-shaped error, regardless of err —
+// callers decide whether to act on it (see enqueuePlan's afterInit).
+func (r *Runner) plan(ctx context.Context, tf tfexec.TF, m *domain.Module, workspace string) (rec *state.RunRecord, needsInit bool, err error) {
 	planFile, err := r.store.PlanFilePath(m.Path, workspace)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	rec := &state.RunRecord{
+	rec = &state.RunRecord{
 		ModulePath:  m.Path,
 		Workspace:   workspace,
 		PlanStarted: time.Now(),
@@ -604,8 +706,9 @@ func (r *Runner) plan(ctx context.Context, tf tfexec.TF, m *domain.Module, works
 		_ = os.WriteFile(logPath, res.Output, 0o600) // fallback if streaming setup failed
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
+	needsInit = res.ExitCode == tfexec.PlanError && tfexec.NeedsInit(res.Output)
 	rec.PlanExitCode = res.ExitCode
 	if res.ExitCode == tfexec.PlanError {
 		rec.PlanErrorKind = string(tfexec.ClassifyPlanError(res.Output))
@@ -634,7 +737,7 @@ func (r *Runner) plan(ctx context.Context, tf tfexec.TF, m *domain.Module, works
 		_ = r.store.DiscardPlan(m.Path, workspace)
 	}
 	if err := r.store.SaveRun(rec); err != nil {
-		return rec, err
+		return rec, needsInit, err
 	}
-	return rec, nil
+	return rec, needsInit, nil
 }

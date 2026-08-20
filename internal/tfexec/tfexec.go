@@ -13,9 +13,10 @@
 //   - cancellation sends SIGINT first (terraform releases state locks on
 //     SIGINT; SIGKILL leaks them), with a kill after a grace period
 //
-// Callers must hold the per-module-directory lock (see internal/runner) while
-// invoking anything here: init mutates .terraform/ and any command can turn
-// into an init via the retry path.
+// Callers must hold the per-module-directory lock (see internal/runner)
+// while invoking anything here: init mutates .terraform/. Deciding when a
+// command needs init, and retrying after it, is the caller's job (see
+// Initialized and NeedsInit) — this package only builds and runs commands.
 package tfexec
 
 import (
@@ -131,42 +132,13 @@ func (t TF) Init(ctx context.Context, upgrade bool) (Result, error) {
 	return t.run(ctx, "", args...)
 }
 
-// runWithInitRetry runs fn; on exit 1 with an init-shaped error it runs init
-// once and retries fn once. Init output is prepended so failures show the
-// whole story.
-func (t TF) runWithInitRetry(ctx context.Context, fn func() (Result, error)) (Result, error) {
-	if !t.Initialized() {
-		if res, err := t.Init(ctx, false); err != nil || res.ExitCode != 0 {
-			return res, err
-		}
-	}
-	res, err := fn()
-	if err != nil || res.ExitCode != 1 || !NeedsInit(res.Output) {
-		return res, err
-	}
-	initRes, err := t.Init(ctx, false)
-	if err != nil || initRes.ExitCode != 0 {
-		initRes.Output = append(res.Output, initRes.Output...)
-		return initRes, err
-	}
-	retry, err := fn()
-	if err != nil || retry.ExitCode != 0 {
-		// Prepend init output so the error shows the full story.
-		retry.Output = append(initRes.Output, retry.Output...)
-	}
-	return retry, err
-}
-
-// WorkspaceList enumerates the module's workspaces, lazily initializing.
-func (t TF) WorkspaceList(ctx context.Context) ([]string, error) {
-	res, err := t.runWithInitRetry(ctx, func() (Result, error) {
-		return t.run(ctx, "", "workspace", "list", "-no-color")
-	})
-	if err != nil {
-		return nil, err
-	}
-	if res.ExitCode != 0 {
-		return nil, fmt.Errorf("workspace list in %s failed:\n%s", t.Dir, res.Output)
+// WorkspaceList enumerates the module's workspaces. Callers are responsible
+// for initializing the module first (see Initialized/NeedsInit) — this runs
+// `workspace list` exactly once and reports whatever it gets.
+func (t TF) WorkspaceList(ctx context.Context) (Result, []string, error) {
+	res, err := t.run(ctx, "", "workspace", "list", "-no-color")
+	if err != nil || res.ExitCode != 0 {
+		return res, nil, err
 	}
 	var workspaces []string
 	for line := range strings.SplitSeq(string(res.Output), "\n") {
@@ -175,7 +147,7 @@ func (t TF) WorkspaceList(ctx context.Context) ([]string, error) {
 			workspaces = append(workspaces, ws)
 		}
 	}
-	return workspaces, nil
+	return res, workspaces, nil
 }
 
 // Plan exit codes with -detailed-exitcode.
@@ -226,21 +198,19 @@ func ClassifyPlanError(output []byte) PlanErrorKind {
 }
 
 // Plan runs terraform plan for one workspace, writing the plan to outFile.
-// The returned ExitCode follows -detailed-exitcode semantics; an init-shaped
-// failure triggers one init+retry.
+// The returned ExitCode follows -detailed-exitcode semantics. Callers are
+// responsible for initializing the module first and for retrying after an
+// init-shaped failure (see Initialized/NeedsInit).
 func (t TF) Plan(ctx context.Context, workspace, outFile string) (Result, error) {
-	return t.runWithInitRetry(ctx, func() (Result, error) {
-		return t.run(ctx, workspace,
-			"plan", "-input=false", "-no-color", "-detailed-exitcode", "-out="+outFile)
-	})
+	return t.run(ctx, workspace,
+		"plan", "-input=false", "-no-color", "-detailed-exitcode", "-out="+outFile)
 }
 
 // Output runs `terraform output` for one workspace, returning its plain-text
-// listing. An init-shaped failure triggers one init+retry.
+// listing. Callers are responsible for initializing the module first and for
+// retrying after an init-shaped failure (see Initialized/NeedsInit).
 func (t TF) Output(ctx context.Context, workspace string) (Result, error) {
-	return t.runWithInitRetry(ctx, func() (Result, error) {
-		return t.run(ctx, workspace, "output", "-no-color")
-	})
+	return t.run(ctx, workspace, "output", "-no-color")
 }
 
 // Apply applies a saved plan file. Used only for constructing the tmux

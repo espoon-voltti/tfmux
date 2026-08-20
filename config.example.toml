@@ -22,6 +22,13 @@ tmux_session = "tfmux"
 # Saved plan files older than this are deleted (they contain secrets).
 plan_ttl = "24h"
 
+# Max concurrent `terraform init` calls, across all modules. 0 (default)
+# auto-detects: capped to 1 when a Terraform/OpenTofu plugin cache
+# (plugin_cache_dir / TF_PLUGIN_CACHE_DIR) is configured — concurrent inits
+# against a shared cache can corrupt it — unlimited otherwise. Set explicitly
+# to override detection.
+#init_parallelism = 0
+
 # Per-repo overrides, keyed by repo path.
 #[repos."~/work/iac/legacy-repo"]
 #terraform_bin = "terraform-0.13"

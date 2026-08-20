@@ -24,13 +24,17 @@ type fixture struct {
 }
 
 func newFixture(t *testing.T, parallelism int) *fixture {
+	return newFixtureInitLimit(t, parallelism, 0)
+}
+
+func newFixtureInitLimit(t *testing.T, parallelism, initLimit int) *fixture {
 	t.Helper()
 	bin := tftest.Write(t, t.TempDir())
 	logFile := filepath.Join(t.TempDir(), "calls.log")
 	t.Setenv("TFMUX_FAKE_LOG", logFile)
 	store := state.New(t.TempDir())
 	return &fixture{
-		runner:  New(parallelism, store, nil),
+		runner:  New(parallelism, initLimit, store, nil),
 		store:   store,
 		logFile: logFile,
 		bin:     bin,
@@ -42,6 +46,20 @@ func (f *fixture) newModule(t *testing.T, name string) *domain.Module {
 	t.Helper()
 	repoDir := filepath.Join(t.TempDir(), name)
 	if err := os.MkdirAll(filepath.Join(repoDir, ".terraform"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repo := &domain.Repo{Path: repoDir, Name: name}
+	m := &domain.Module{Repo: repo, Path: repoDir, RelPath: ".", TFBin: f.bin}
+	repo.Modules = []*domain.Module{m}
+	return m
+}
+
+// newUninitModule creates a git-less module dir without .terraform, so the
+// first task against it must go through init.
+func (f *fixture) newUninitModule(t *testing.T, name string) *domain.Module {
+	t.Helper()
+	repoDir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	repo := &domain.Repo{Path: repoDir, Name: name}
@@ -328,4 +346,169 @@ func TestCancelQueuedEmitsCanceled(t *testing.T) {
 	waitFor(t, f.runner.Events, func(e Event) bool {
 		return e.Key == blocker.Path && e.Phase.Terminal()
 	})
+}
+
+// A task on an uninitialized module must defer to a KindInit task and retry
+// afterward, transparently to the caller: two Running events (before and
+// after the init) and exactly one terminal event, reporting success.
+func TestDefersToInitWhenUninitialized(t *testing.T) {
+	cases := []struct {
+		name    string
+		kind    Kind
+		enqueue func(f *fixture, m *domain.Module) (ok bool, key string)
+	}{
+		{"enumerate", KindEnumerate, func(f *fixture, m *domain.Module) (bool, string) {
+			return f.runner.EnqueueEnumerate(m), m.Path
+		}},
+		{"plan", KindPlan, func(f *fixture, m *domain.Module) (bool, string) {
+			ws := &domain.Workspace{Module: m, Name: "prod"}
+			return f.runner.EnqueuePlan(ws), ws.Key()
+		}},
+		{"output", KindOutput, func(f *fixture, m *domain.Module) (bool, string) {
+			ws := &domain.Workspace{Module: m, Name: "prod"}
+			return f.runner.EnqueueOutput(ws), ws.Key()
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t, 2)
+			m := f.newUninitModule(t, "mod1")
+			ok, key := c.enqueue(f, m)
+			if !ok {
+				t.Fatal("enqueue refused")
+			}
+			taskID := TaskID(c.kind, key)
+			initID := TaskID(KindInit, m.Path)
+
+			var running int
+			var initDone bool
+			var final Event
+		loop:
+			for {
+				ev := waitFor(t, f.runner.Events, func(e Event) bool {
+					return e.TaskID() == taskID || e.TaskID() == initID
+				})
+				switch {
+				case ev.TaskID() == taskID && ev.Phase == PhaseRunning:
+					running++
+				case ev.TaskID() == taskID && ev.Phase.Terminal():
+					final = ev
+					break loop
+				case ev.TaskID() == initID && ev.Phase.Terminal():
+					initDone = true
+				}
+			}
+			if running != 2 {
+				t.Errorf("expected 2 Running events (before and after init), got %d", running)
+			}
+			if !initDone {
+				t.Error("expected the deferred KindInit task to complete")
+			}
+			if final.Phase != PhaseDone {
+				t.Errorf("final phase = %v, err = %q", final.Phase, final.Err)
+			}
+		})
+	}
+}
+
+// A plan that keeps failing with an init-shaped error retries exactly once
+// (via one KindInit task) and then reports the real failure — no infinite
+// requeue loop.
+func TestPlanNeedsInitRetriesOnceThenReportsFailure(t *testing.T) {
+	f := newFixture(t, 2)
+	t.Setenv("TFMUX_FAKE_PLAN_STDERR", `Error: Backend initialization required, please run "terraform init"`)
+	m := f.newModule(t, "mod1") // already initialized: exercises the reactive path, not the upfront check
+	ws := &domain.Workspace{Module: m, Name: "prod"}
+	f.runner.EnqueuePlan(ws)
+
+	waitTerminal(t, f.runner.Events, KindInit, 1)
+	ev := waitTerminal(t, f.runner.Events, KindPlan, 1)[0]
+	if ev.Record == nil || ev.Record.PlanExitCode != 1 {
+		t.Fatalf("record = %+v", ev.Record)
+	}
+
+	data, err := os.ReadFile(f.logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var planCalls int
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 5 && fields[0] == "start" && fields[4] == "plan" {
+			planCalls++
+		}
+	}
+	if planCalls != 2 {
+		t.Errorf("expected exactly one retry (2 plan calls), got %d", planCalls)
+	}
+}
+
+// With init_parallelism=1, two modules that both need init never run their
+// init step concurrently, while a third, already-initialized module's plan
+// is not held up behind that serialization.
+func TestInitParallelismLimitsGlobally(t *testing.T) {
+	f := newFixtureInitLimit(t, 3, 1)
+	t.Setenv("TFMUX_FAKE_SLEEP", "1")
+	mod1 := f.newUninitModule(t, "mod1")
+	mod2 := f.newUninitModule(t, "mod2")
+	mod3 := f.newModule(t, "mod3")
+
+	f.runner.EnqueuePlan(&domain.Workspace{Module: mod1, Name: "prod"})
+	f.runner.EnqueuePlan(&domain.Workspace{Module: mod2, Name: "prod"})
+	mod3WS := &domain.Workspace{Module: mod3, Name: "prod"}
+	f.runner.EnqueuePlan(mod3WS)
+	mod3PlanID := TaskID(KindPlan, mod3WS.Key())
+
+	// Collect every relevant event in one pass — waitFor/waitTerminal
+	// discard non-matching events, so calling them one after another here
+	// would drop whichever of these arrives out of the order queried.
+	var initTerminal, planTerminal int
+	initTerminalAtMod3Start := -1
+	timeout := time.After(30 * time.Second)
+	for initTerminal < 2 || planTerminal < 3 {
+		select {
+		case ev := <-f.runner.Events:
+			if ev.TaskID() == mod3PlanID && ev.Phase == PhaseRunning && initTerminalAtMod3Start < 0 {
+				initTerminalAtMod3Start = initTerminal
+			}
+			if ev.Kind == KindInit && ev.Phase.Terminal() {
+				initTerminal++
+			}
+			if ev.Kind == KindPlan && ev.Phase.Terminal() {
+				planTerminal++
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for events")
+		}
+	}
+	// mod3 never needs init, so it must not be stuck behind the two
+	// serialized inits (both had already finished before it even started
+	// would mean it waited on them).
+	if initTerminalAtMod3Start < 0 {
+		t.Fatal("mod3's plan never reported Running")
+	}
+	if initTerminalAtMod3Start >= 2 {
+		t.Errorf("mod3's plan didn't start until %d inits had already finished", initTerminalAtMod3Start)
+	}
+
+	data, err := os.ReadFile(f.logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := 0
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[4] != "init" {
+			continue
+		}
+		switch fields[0] {
+		case "start":
+			open++
+			if open > 1 {
+				t.Fatalf("two init calls overlapped despite init_parallelism=1")
+			}
+		case "end":
+			open--
+		}
+	}
 }

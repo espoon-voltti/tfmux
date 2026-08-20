@@ -94,8 +94,8 @@ func TestModuleLockSerializesAcrossRunners(t *testing.T) {
 		return m
 	}
 
-	rA := New(2, store, nil)
-	rB := New(2, store, nil)
+	rA := New(2, 0, store, nil)
+	rB := New(2, 0, store, nil)
 	if !rA.EnqueueEnumerate(mkMod()) || !rB.EnqueueEnumerate(mkMod()) {
 		t.Fatal("enqueue refused")
 	}

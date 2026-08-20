@@ -119,6 +119,13 @@ Run `tfmux` for the TUI, or `tfmux ls [--json]` for a scriptable dump.
 - **Init is lazy and never `-upgrade`** (that rewrites the lock file —
   explicit `I` only). All commands run `-input=false` so missing credentials
   fail fast instead of hanging a worker.
+- **Concurrent inits are capped when you use a plugin cache.** A shared
+  Terraform/OpenTofu provider plugin cache (`plugin_cache_dir` /
+  `TF_PLUGIN_CACHE_DIR`) only tolerates one `terraform init` at a time —
+  concurrent inits against it can corrupt the cache. tfmux detects this
+  automatically and caps concurrent inits (lazy or explicit) at 1, without
+  touching `parallelism` for anything else; override with `init_parallelism`
+  if detection ever needs a hand.
 - **Plan files contain secrets.** They live under `~/.local/state/tfmux`
   with 0700/0600 permissions and are deleted after a successful apply, on
   discard, and after `plan_ttl` (default 24h).
