@@ -512,3 +512,88 @@ func TestInitParallelismLimitsGlobally(t *testing.T) {
 		}
 	}
 }
+
+// An init -upgrade queued for a module before a plan of that module must run
+// first, even when init_parallelism holds the init back — otherwise the plan
+// races the upgrade it was meant to follow.
+func TestQueuedInitBlocksPlanInSameModule(t *testing.T) {
+	f := newFixtureInitLimit(t, 4, 1)
+	t.Setenv("TFMUX_FAKE_SLEEP", "1")
+	mods := []*domain.Module{f.newModule(t, "mod1"), f.newModule(t, "mod2")}
+
+	for _, m := range mods {
+		if !f.runner.EnqueueInitUpgrade(m) {
+			t.Fatal("init enqueue refused")
+		}
+	}
+	for _, m := range mods {
+		if !f.runner.EnqueuePlan(&domain.Workspace{Module: m, Name: "prod"}) {
+			t.Fatal("plan enqueue refused")
+		}
+	}
+
+	// One pass, since waitTerminal would discard the plan terminals it isn't
+	// waiting for yet.
+	var initDone, planDone int
+	timeout := time.After(30 * time.Second)
+	for initDone < len(mods) || planDone < len(mods) {
+		select {
+		case ev := <-f.runner.Events:
+			if !ev.Phase.Terminal() {
+				continue
+			}
+			if ev.Phase != PhaseDone {
+				t.Fatalf("%s %s: phase = %v, err = %q", ev.Kind, ev.Key, ev.Phase, ev.Err)
+			}
+			switch ev.Kind {
+			case KindInit:
+				initDone++
+			case KindPlan:
+				planDone++
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for events")
+		}
+	}
+
+	data, err := os.ReadFile(f.logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type marks struct{ initEnd, planStart int }
+	seen := map[string]*marks{}
+	for i, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		event, dir, cmd := fields[0], fields[2], fields[4]
+		mk, ok := seen[dir]
+		if !ok {
+			mk = &marks{initEnd: -1, planStart: -1}
+			seen[dir] = mk
+		}
+		if event == "end" && cmd == "init" {
+			mk.initEnd = i
+		}
+		if event == "start" && cmd == "plan" && mk.planStart < 0 {
+			mk.planStart = i
+		}
+	}
+	for _, m := range mods {
+		dir, err := filepath.EvalSymlinks(m.Path) // the log records the resolved cwd
+		if err != nil {
+			t.Fatal(err)
+		}
+		mk, ok := seen[dir]
+		if !ok {
+			t.Fatalf("no terraform calls logged for %s", m.Path)
+		}
+		if mk.initEnd < 0 || mk.planStart < 0 {
+			t.Fatalf("%s: init end at %d, plan start at %d", m.Path, mk.initEnd, mk.planStart)
+		}
+		if mk.planStart < mk.initEnd {
+			t.Errorf("%s: plan started before its init finished", m.Path)
+		}
+	}
+}

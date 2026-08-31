@@ -27,7 +27,10 @@
 //     a task from holding its slot/module lock while merely waiting for init,
 //     and lets a global cap (config `init_parallelism`) serialize init across
 //     modules when a shared Terraform/OpenTofu plugin cache requires it,
-//     without touching `parallelism`.
+//     without touching `parallelism`. A queued or running init also holds back
+//     every other kind of task in that module (an apply excepted, since it
+//     preempts), so a throttled init can't be overtaken by the plan waiting
+//     on it.
 //
 // Applies run in a tmux window (they're interactive, long-running, and must
 // outlive tfmux) but still occupy a pool slot: the task launches the window,
@@ -242,7 +245,13 @@ func (r *Runner) pickLocked() *task {
 		if r.busyModule[t.modulePath] {
 			continue
 		}
-		if t.kind == KindInit && r.initLimit > 0 && r.activeInits >= r.initLimit {
+		if t.kind == KindInit {
+			if r.initLimit > 0 && r.activeInits >= r.initLimit {
+				continue
+			}
+		} else if t.kind != KindApply && r.initQueuedLocked(t.modulePath) {
+			// An apply is exempt: it preempts, and its plan file was made
+			// against the module's current lock file, not the upgraded one.
 			continue
 		}
 		if best < 0 {
@@ -261,6 +270,16 @@ func (r *Runner) pickLocked() *task {
 	t := r.ready[bi]
 	r.ready = append(r.ready[:bi], r.ready[bi+1:]...)
 	return t
+}
+
+// initQueuedLocked reports whether an init task for the module is queued or
+// running. Nothing else may enter that module first: the init exists because
+// the user asked for an upgrade or because another task deferred to it, and
+// priority/FIFO order alone doesn't hold a plan back while initLimit keeps the
+// init waiting.
+func (r *Runner) initQueuedLocked(modulePath string) bool {
+	_, ok := r.inflight[TaskID(KindInit, modulePath)]
+	return ok
 }
 
 func (r *Runner) execute(t *task) {
@@ -509,12 +528,8 @@ func (r *Runner) enqueueInit(m *domain.Module, upgrade bool) bool {
 // cleared, so the re-enqueue never collides with this task's own still-
 // registered id.
 //
-// Ordering is guaranteed without extra plumbing: enqueueInit is called before
-// retry, so the init task always gets a strictly lower seq (enqueue
-// increments seq under r.mu); KindInit's priority is >= every kind that can
-// defer to it, so pickLocked always picks the init first when both are ready
-// for the same module, and once picked, busyModule excludes the dependent
-// task until the init's execute() clears it.
+// Ordering needs no extra plumbing: pickLocked won't dispatch the re-enqueued
+// task while an init for its module is queued or running.
 func (r *Runner) deferForInit(m *domain.Module, retry func()) Event {
 	return Event{requeueFn: func() {
 		r.enqueueInit(m, false)
