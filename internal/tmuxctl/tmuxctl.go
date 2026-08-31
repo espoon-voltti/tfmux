@@ -15,7 +15,12 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// tokenOpt is the tmux window option carrying an apply's durable identity —
+// see LaunchApply and WindowFor.
+const tokenOpt = "@tfmux_apply"
 
 // Ctl manages one tmux session. The zero value is unusable; call New.
 type Ctl struct {
@@ -91,13 +96,20 @@ if [ "$ec" -ne 0 ]; then printf '\ntfmux: apply FAILED (exit %%s) — press Ente
 }
 
 // LaunchApply opens a new window running the apply and returns its tmux
-// window ID (stable, unlike names).
-func (c *Ctl) LaunchApply(spec ApplySpec) (string, error) {
+// window ID and a durable token identifying it.
+//
+// The window ID alone isn't enough to re-find this apply later: tmux window
+// IDs (@N) are unique only for the life of one tmux server, so they get
+// reused after a server restart, and a stale persisted ID can then resolve
+// to an entirely unrelated window. The token — stamped onto the window as a
+// tmux option — survives that: WindowFor looks a window up by token, not by
+// ID, so a recycled ID can never be mistaken for this apply.
+func (c *Ctl) LaunchApply(spec ApplySpec) (windowID, token string, err error) {
 	if err := os.Remove(spec.ExitFile); err != nil && !os.IsNotExist(err) {
-		return "", err
+		return "", "", err
 	}
 	if err := c.ensureSession(); err != nil {
-		return "", err
+		return "", "", err
 	}
 	name := spec.Name
 	if name == "" {
@@ -106,9 +118,38 @@ func (c *Ctl) LaunchApply(spec ApplySpec) (string, error) {
 	out, err := c.run("new-window", "-t", c.Session+":", "-n", name,
 		"-P", "-F", "#{window_id}", applyScript(spec))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	windowID = strings.TrimSpace(string(out))
+	token = fmt.Sprintf("%s//%s@%d", spec.ModuleDir, spec.Workspace, time.Now().UnixNano())
+	if _, err := c.run("set-option", "-w", "-t", windowID, tokenOpt, token); err != nil {
+		_ = c.KillWindow(windowID)
+		return "", "", fmt.Errorf("stamping apply window: %w", err)
+	}
+	return windowID, token, nil
+}
+
+// WindowFor returns the id of the window currently carrying this token, if
+// one exists. An apply's window can only ever be found this way — never by
+// its (possibly stale, possibly recycled) window ID alone.
+func (c *Ctl) WindowFor(token string) (string, bool) {
+	if token == "" {
+		return "", false
+	}
+	if _, err := c.run("has-session", "-t", "="+c.Session); err != nil {
+		return "", false
+	}
+	out, err := c.run("list-windows", "-t", c.Session, "-F", "#{window_id} #{"+tokenOpt+"}")
+	if err != nil {
+		return "", false
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		id, tok, ok := strings.Cut(line, " ")
+		if ok && tok == token {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 // ListWindowIDs returns the IDs of the session's current windows. A missing
@@ -149,14 +190,22 @@ func (c *Ctl) KillWindow(windowID string) error {
 // AttachCmd returns the command that brings the user to the session,
 // optionally focused on a window. Inside tmux ($TMUX set) attaching would
 // nest, so switch the client instead.
-func (c *Ctl) AttachCmd(windowID string) *exec.Cmd {
+//
+// windowID must be freshly resolved (e.g. via WindowFor) by the caller —
+// AttachCmd itself only selects it and fails loudly if that's no longer
+// possible, rather than silently falling back to "whatever window happens to
+// be selected in the session right now" (which is how a stale apply's
+// leftover window used to get shown in place of the one actually asked for).
+func (c *Ctl) AttachCmd(windowID string) (*exec.Cmd, error) {
 	target := c.Session
 	if windowID != "" {
+		if _, err := c.run("select-window", "-t", windowID); err != nil {
+			return nil, fmt.Errorf("apply window %s is gone: %w", windowID, err)
+		}
 		target = c.Session + ":" + windowID
-		_, _ = c.run("select-window", "-t", windowID)
 	}
 	if os.Getenv("TMUX") != "" {
-		return exec.Command(c.Bin, "switch-client", "-t", target)
+		return exec.Command(c.Bin, "switch-client", "-t", target), nil
 	}
-	return exec.Command(c.Bin, "attach-session", "-t", c.Session)
+	return exec.Command(c.Bin, "attach-session", "-t", target), nil
 }

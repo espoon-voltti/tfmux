@@ -38,11 +38,11 @@ import (
 // (queued) when the UI enqueues it, flipped to running on the runner's
 // PhaseRunning event, and removed on any terminal event.
 type taskState struct {
-	kind     runner.Kind
-	key      string // module path (enumerate/init) or workspace key (plan/apply)
-	running  bool   // false: queued waiting for a slot; true: executing
-	windowID string // apply: the tmux window to attach to
-	started  time.Time
+	kind    runner.Kind
+	key     string // module path (enumerate/init) or workspace key (plan/apply)
+	running bool   // false: queued waiting for a slot; true: executing
+	token   string // apply: the tmux window's durable identity — see tmuxctl.WindowFor
+	started time.Time
 }
 
 type focusArea int
@@ -106,8 +106,8 @@ type Model struct {
 	showHelp     bool
 	confirmQuit  bool
 
-	taskCursor  int    // selection in the task pane
-	confirmKill string // task id awaiting kill confirmation (running apply)
+	taskCursorID string // TaskID of the selection in the task pane — not a bare index, see taskCursorIndex
+	confirmKill  string // task id awaiting kill confirmation (running apply)
 
 	// confirmApply holds the applyable workspaces awaiting confirmation for a
 	// mass apply over a repo/module row (confirmApplyLabel names the scope).
@@ -226,7 +226,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// re-adopt applies that were still running in tmux when tfmux exited
 		for _, rec := range msg.runs {
 			if rec.Apply != nil && rec.Apply.ExitCode == nil && !rec.Apply.Aborted {
-				if m.runner.EnqueueApplyPoll(rec.ModulePath, rec.Workspace, rec.Apply.WindowID) {
+				if m.runner.EnqueueApplyPoll(rec.ModulePath, rec.Workspace, rec.Apply.Token) {
 					m.addTask(runner.KindApply, rec.ModulePath+"//"+rec.Workspace)
 				}
 			}
@@ -428,10 +428,10 @@ func (m *Model) taskRunning(ev runner.Event, ts *taskState) tea.Cmd {
 	case runner.KindInit:
 		m.status = "init running…"
 	case runner.KindApply:
-		if ev.WindowID != "" {
-			ts.windowID = ev.WindowID
+		if ev.Token != "" {
+			ts.token = ev.Token
 			if rec := m.runs[ev.Key]; rec != nil {
-				rec.Apply = &state.ApplyRecord{Started: time.Now(), WindowID: ev.WindowID}
+				rec.Apply = &state.ApplyRecord{Started: time.Now(), WindowID: ev.WindowID, Token: ev.Token}
 				m.status = "apply launched in tmux — press enter to attach"
 				return saveRunCmd(m.store, rec)
 			}
@@ -831,7 +831,7 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showIgnored = !m.showIgnored
 		m.reflow()
 		if hasPrev {
-			m.focusNode(prev.nodeKey())
+			m.focusNode(prev.rowID())
 		}
 	case key.Matches(msg, keys.InitUpgrade):
 		m.initUpgradeCurrent()
@@ -846,7 +846,9 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.applyCurrent()
 	case key.Matches(msg, keys.Tasks):
 		m.focus = focusTasks
-		m.taskCursor = 0
+		if tasks := m.sortedTasks(); len(tasks) > 0 {
+			m.taskCursorID = runner.TaskID(tasks[0].kind, tasks[0].key)
+		}
 	}
 	return m, nil
 }
@@ -881,7 +883,7 @@ func (m *Model) collapseOthers() {
 	if !ok {
 		return
 	}
-	target := r.nodeKey()
+	target := r.rowID()
 	m.collapseAllExcept(r.repo)
 	m.reflow()
 	m.focusNode(target)
@@ -899,11 +901,11 @@ func (m *Model) collapseLeft() {
 	case r.kind == rowWorkspace:
 		m.collapsed[r.mod.Path] = true
 		m.reflow()
-		m.focusNode(r.mod.Path)
+		m.focusNode(moduleRowID(r.mod.Path))
 	case r.kind == rowModule && m.collapsed[r.mod.Path]:
 		m.collapsed[r.repo.Path] = true
 		m.reflow()
-		m.focusNode(r.repo.Path)
+		m.focusNode(repoRowID(r.repo.Path))
 	default: // expanded module or repo: collapse in place
 		m.collapsed[r.nodeKey()] = true
 		m.reflow()
@@ -925,14 +927,14 @@ func (m *Model) expandRight() {
 		delete(m.collapsed, r.nodeKey())
 	}
 	m.reflow()
-	m.focusNode(r.nodeKey())
+	m.focusNode(r.rowID())
 }
 
 // expandAll un-collapses the whole tree, keeping the cursor on its item.
 func (m *Model) expandAll() {
 	target := ""
 	if r, ok := m.currentRow(); ok {
-		target = r.nodeKey()
+		target = r.rowID()
 	}
 	m.collapsed = map[string]bool{}
 	m.reflow()
@@ -941,10 +943,10 @@ func (m *Model) expandAll() {
 	}
 }
 
-// focusNode moves the cursor to the row matching nodeKey, if still visible.
-func (m *Model) focusNode(nodeKey string) {
+// focusNode moves the cursor to the row with this rowID, if still visible.
+func (m *Model) focusNode(rowID string) {
 	for i, r := range m.rows {
-		if r.nodeKey() == nodeKey {
+		if r.rowID() == rowID {
 			m.cursor = i
 			break
 		}
@@ -952,9 +954,25 @@ func (m *Model) focusNode(nodeKey string) {
 	m.ensureVisible()
 }
 
+// reflow rebuilds the visible rows and keeps the cursor on the same row
+// (by rowID, not by index) whenever that row is still visible afterward —
+// otherwise the cursor silently drifts to whatever row now occupies its old
+// index. Row count changes constantly from background completions
+// (workspace enumeration, `runsLoadedMsg`, a full rediscover on R) as well as
+// user actions, so this has to be reflow's own job rather than something
+// each caller remembers to do; callers that want the cursor somewhere other
+// than where it started (e.g. collapseLeft moving it to the parent) still
+// call focusNode explicitly afterward.
 func (m *Model) reflow() {
+	var target string
+	if r, ok := m.currentRow(); ok {
+		target = r.rowID()
+	}
 	m.rows = m.flatten()
 	m.recountTree()
+	if target != "" {
+		m.focusNode(target)
+	}
 	if m.cursor >= len(m.rows) {
 		m.cursor = len(m.rows) - 1
 	}
@@ -1418,17 +1436,21 @@ func (m *Model) enqueueApplies(targets []*domain.Workspace) tea.Cmd {
 	return nil
 }
 
-// liveApplyWindow returns the tmux window to attach to for a workspace, when
-// one is worth attaching to: an apply running now, or a failed apply whose
-// window the wrapper kept open for inspection. A clean/aborted apply has no
-// live window.
+// liveApplyWindow returns the token of the apply window to attach to for a
+// workspace, when one is worth attaching to: an apply running now, or a
+// failed apply whose window the wrapper kept open for inspection. A
+// clean/aborted apply has no live window.
+//
+// A token, not a raw window ID, identifies the window: see
+// tmuxctl.WindowFor. A record with no token predates this fix (or the token
+// was never persisted) and no longer has a safely-resolvable window.
 func (m *Model) liveApplyWindow(key string) (string, bool) {
-	if ts := m.task(runner.KindApply, key); ts != nil && ts.windowID != "" {
-		return ts.windowID, true
+	if ts := m.task(runner.KindApply, key); ts != nil && ts.token != "" {
+		return ts.token, true
 	}
-	if rec := m.runs[key]; rec != nil && rec.Apply != nil && !rec.Apply.Aborted && rec.Apply.WindowID != "" {
+	if rec := m.runs[key]; rec != nil && rec.Apply != nil && !rec.Apply.Aborted && rec.Apply.Token != "" {
 		if rec.Apply.ExitCode != nil && *rec.Apply.ExitCode != 0 {
-			return rec.Apply.WindowID, true
+			return rec.Apply.Token, true
 		}
 	}
 	return "", false
@@ -1438,8 +1460,8 @@ func (m *Model) liveApplyWindow(key string) (string, bool) {
 // workspace: attach to its live apply window if there is one, otherwise open
 // (and, while a plan runs, follow) its plan log.
 func (m *Model) viewOrAttach(key string) tea.Cmd {
-	if win, ok := m.liveApplyWindow(key); ok {
-		return m.attachWindow(win)
+	if token, ok := m.liveApplyWindow(key); ok {
+		return m.attachWindow(token)
 	}
 	return m.openLog(runner.KindPlan, key)
 }
@@ -1477,12 +1499,25 @@ func (m *Model) viewModule(mod *domain.Module) tea.Cmd {
 	return nil
 }
 
-func (m *Model) attachWindow(windowID string) tea.Cmd {
+// attachWindow resolves token to whatever window currently carries it (it
+// may have moved to a different window ID since it was recorded, or vanished
+// entirely) and attaches there. It never attaches "blind" to a stale ID.
+func (m *Model) attachWindow(token string) tea.Cmd {
 	if !m.tmuxOK {
 		m.status = "tmux not found — install it: brew install tmux"
 		return nil
 	}
-	return tea.ExecProcess(m.tmux.AttachCmd(windowID), func(err error) tea.Msg {
+	windowID, ok := m.tmux.WindowFor(token)
+	if !ok {
+		m.status = "apply window is gone — it may already have closed"
+		return nil
+	}
+	cmd, err := m.tmux.AttachCmd(windowID)
+	if err != nil {
+		m.status = "tmux attach: " + err.Error()
+		return nil
+	}
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
 			return statusMsg{text: "tmux attach: " + err.Error()}
 		}

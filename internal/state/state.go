@@ -55,7 +55,8 @@ type ApplyRecord struct {
 	Started  time.Time  `json:"started"`
 	Finished *time.Time `json:"finished,omitempty"`
 	ExitCode *int       `json:"exit_code,omitempty"` // nil while running/unknown
-	WindowID string     `json:"window_id,omitempty"` // tmux @window_id
+	WindowID string     `json:"window_id,omitempty"` // tmux @window_id — display/debugging only, see Token
+	Token    string     `json:"token,omitempty"`     // durable identity stamped on the window; the only safe way to re-find it (window IDs get recycled across tmux server restarts)
 	Aborted  bool       `json:"aborted,omitempty"`   // window vanished without exit file
 }
 

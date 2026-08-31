@@ -5,18 +5,62 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/tmuxctl"
 )
 
-func runningApplyTask(m *Model, key, windowID string) {
+func runningApplyTask(m *Model, key, token string) {
 	m.tasks[runner.TaskID(runner.KindApply, key)] = &taskState{
-		kind: runner.KindApply, key: key, running: true, windowID: windowID,
+		kind: runner.KindApply, key: key, running: true, token: token,
 	}
+}
+
+// fakeTmux stands in for a real tmux server: windows exist only if
+// registered via addWindow, keyed by the same id/token scheme
+// tmuxctl.LaunchApply uses (WindowFor resolves by token, never by a raw id
+// alone) — so tests exercise attach/kill exactly as the real resolution path
+// does, rather than a mock that answers every call unconditionally.
+type fakeTmux struct {
+	windows map[string]string // window id -> token
+	killed  []string
+}
+
+func newFakeTmux() *fakeTmux { return &fakeTmux{windows: map[string]string{}} }
+
+func (f *fakeTmux) addWindow(id, token string) { f.windows[id] = token }
+
+func (f *fakeTmux) run(args ...string) ([]byte, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	switch args[0] {
+	case "has-session":
+		return nil, nil
+	case "list-windows":
+		var b strings.Builder
+		for id, token := range f.windows {
+			fmt.Fprintf(&b, "%s %s\n", id, token)
+		}
+		return []byte(b.String()), nil
+	case "select-window":
+		id := args[len(args)-1]
+		if _, ok := f.windows[id]; !ok {
+			return nil, fmt.Errorf("no such window: %s", id)
+		}
+		return nil, nil
+	case "kill-window":
+		id := args[len(args)-1]
+		f.killed = append(f.killed, id)
+		delete(f.windows, id)
+		return nil, nil
+	}
+	return nil, nil
 }
 
 func TestTaskPaneListsTasks(t *testing.T) {
@@ -60,7 +104,7 @@ func TestCancelAllQueuedKeepsRunningApply(t *testing.T) {
 	enumerated(t, m, mod, "a", "b")
 	m.addTask(runner.KindPlan, mod.Path+"//a")
 	m.addTask(runner.KindPlan, mod.Path+"//b")
-	runningApplyTask(m, mod.Path+"//a", "@1")
+	runningApplyTask(m, mod.Path+"//a", "tok-a")
 
 	m.cancelQueuedTasks()
 
@@ -77,21 +121,17 @@ func TestKillRunningApplyNeedsConfirm(t *testing.T) {
 	enumerated(t, m, mod, "prod")
 	key := mod.Path + "//prod"
 
-	var killed []string
-	m.tmux = tmuxctl.NewWithRunner("sess", func(args ...string) ([]byte, error) {
-		if len(args) > 0 && args[0] == "kill-window" {
-			killed = append(killed, args[len(args)-1])
-		}
-		return nil, nil
-	})
-	runningApplyTask(m, key, "@1")
+	ft := newFakeTmux()
+	ft.addWindow("@1", "tok-1")
+	m.tmux = tmuxctl.NewWithRunner("sess", ft.run)
+	runningApplyTask(m, key, "tok-1")
 
 	keyPress(m, "T")
 	keyPress(m, "x") // selects the running apply
 	if m.confirmKill == "" {
 		t.Fatal("killing a running apply should ask for confirmation")
 	}
-	if len(killed) != 0 {
+	if len(ft.killed) != 0 {
 		t.Error("must not kill before confirmation")
 	}
 
@@ -99,8 +139,8 @@ func TestKillRunningApplyNeedsConfirm(t *testing.T) {
 	if m.confirmKill != "" {
 		t.Error("confirmation should clear after y")
 	}
-	if len(killed) != 1 || killed[0] != "@1" {
-		t.Errorf("kill-window not invoked on the window: %v", killed)
+	if len(ft.killed) != 1 || ft.killed[0] != "@1" {
+		t.Errorf("kill-window not invoked on the window: %v", ft.killed)
 	}
 }
 
@@ -115,8 +155,8 @@ func TestLiveApplyWindow(t *testing.T) {
 		t.Error("no apply → no window")
 	}
 
-	runningApplyTask(m, key, "@1")
-	if w, ok := m.liveApplyWindow(key); !ok || w != "@1" {
+	runningApplyTask(m, key, "tok-1")
+	if w, ok := m.liveApplyWindow(key); !ok || w != "tok-1" {
 		t.Errorf("running apply: got %q %v", w, ok)
 	}
 	delete(m.tasks, runner.TaskID(runner.KindApply, key))
@@ -124,7 +164,7 @@ func TestLiveApplyWindow(t *testing.T) {
 	zero := 0
 	m.runs[key] = &state.RunRecord{
 		ModulePath: mod.Path, Workspace: "prod",
-		Apply: &state.ApplyRecord{WindowID: "@2", ExitCode: &zero},
+		Apply: &state.ApplyRecord{WindowID: "@2", Token: "tok-2", ExitCode: &zero},
 	}
 	if _, ok := m.liveApplyWindow(key); ok {
 		t.Error("clean apply → no live window")
@@ -132,7 +172,7 @@ func TestLiveApplyWindow(t *testing.T) {
 
 	one := 1
 	m.runs[key].Apply.ExitCode = &one
-	if w, ok := m.liveApplyWindow(key); !ok || w != "@2" {
+	if w, ok := m.liveApplyWindow(key); !ok || w != "tok-2" {
 		t.Errorf("failed apply: got %q %v", w, ok)
 	}
 
@@ -149,8 +189,10 @@ func TestEnterAttachesToRunningApply(t *testing.T) {
 	enumerated(t, m, mod, "prod")
 	key := mod.Path + "//prod"
 	m.tmuxOK = true
-	m.tmux = tmuxctl.NewWithRunner("sess", func(args ...string) ([]byte, error) { return nil, nil })
-	runningApplyTask(m, key, "@1")
+	ft := newFakeTmux()
+	ft.addWindow("@1", "tok-1")
+	m.tmux = tmuxctl.NewWithRunner("sess", ft.run)
+	runningApplyTask(m, key, "tok-1")
 	m.cursor = 2 // workspace row
 
 	cmd := keyPress(m, "enter")
@@ -165,11 +207,106 @@ func TestEnterAttachesToRunningApply(t *testing.T) {
 	}
 }
 
+// Pressing enter on an apply whose token no longer resolves to any window
+// (the tmux server restarted, or the window was closed) must say so. Attaching
+// anyway is what used to drop the user into an unrelated leftover window and
+// present its days-old output as this apply's.
+func TestEnterOnGoneApplyWindowSaysSo(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	m.tmuxOK = true
+	m.tmux = tmuxctl.NewWithRunner("sess", newFakeTmux().run) // no windows at all
+	runningApplyTask(m, key, "tok-gone")
+	m.cursor = 2 // workspace row
+
+	if cmd := keyPress(m, "enter"); cmd != nil {
+		t.Error("must not attach when the token resolves to no window")
+	}
+	if !strings.Contains(m.status, "gone") {
+		t.Errorf("status doesn't say the window is gone: %q", m.status)
+	}
+}
+
+// The pane's selection has to follow its task through a reordering, which
+// happens on its own whenever a queued task starts running: running sorts to
+// the front, pushing everything queued down a row under a fixed index.
+func TestTaskPaneSelectionSurvivesReorder(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "a", "b", "c")
+	started := time.Now()
+	for i, ws := range []string{"a", "b", "c"} {
+		key := mod.Path + "//" + ws
+		m.tasks[runner.TaskID(runner.KindPlan, key)] = &taskState{
+			kind: runner.KindPlan, key: key, started: started.Add(time.Duration(i) * time.Second),
+		}
+	}
+	wantKey := mod.Path + "//b"
+
+	keyPress(m, "T")
+	keyPress(m, "j") // onto b, the second row
+	if got := m.taskCursorID; got != runner.TaskID(runner.KindPlan, wantKey) {
+		t.Fatalf("setup: selection = %q, want b's task", got)
+	}
+
+	// c starting jumps it above the queued a and b, so b is no longer the
+	// second row.
+	m.tasks[runner.TaskID(runner.KindPlan, mod.Path+"//c")].running = true
+
+	tasks := m.sortedTasks()
+	i, ok := m.taskCursorIndex(tasks)
+	if !ok || tasks[i].key != wantKey {
+		t.Errorf("selection left b's task for %v (ok=%v)", keysOf(tasks), ok)
+	}
+	if tasks[1].key == wantKey {
+		t.Error("the reorder didn't move b, so this proves nothing")
+	}
+}
+
+// Two tied tasks (same running/priority/started) must sort into the same
+// order every time: m.tasks is a map, so the pre-sort order sortedTasks
+// builds from it is randomized per call, and without a deterministic final
+// tiebreaker sort.Slice (not stable) could legally disagree between two
+// calls a keypress apart — the render call and the "act on selected row"
+// call — making the highlighted row and the acted-on task different tasks.
+func TestSortedTasksIsDeterministicForTiedTasks(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "a", "b", "c")
+	started := time.Now()
+	for _, ws := range []string{"a", "b", "c"} {
+		key := mod.Path + "//" + ws
+		m.tasks[runner.TaskID(runner.KindPlan, key)] = &taskState{
+			kind: runner.KindPlan, key: key, running: false, started: started,
+		}
+	}
+
+	first := m.sortedTasks()
+	for i := 0; i < 50; i++ {
+		got := m.sortedTasks()
+		if len(got) != len(first) {
+			t.Fatalf("length changed between calls")
+		}
+		for j := range got {
+			if got[j].key != first[j].key {
+				t.Fatalf("order changed between calls at %d: %v vs %v", j, keysOf(first), keysOf(got))
+			}
+		}
+	}
+}
+
+func keysOf(tasks []*taskState) []string {
+	out := make([]string, len(tasks))
+	for i, ts := range tasks {
+		out[i] = ts.key
+	}
+	return out
+}
+
 func TestTaskPaneSortsRunningFirst(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "a", "b")
-	m.addTask(runner.KindEnumerate, mod.Path) // queued, low priority
-	runningApplyTask(m, mod.Path+"//a", "@1") // running, high priority
+	m.addTask(runner.KindEnumerate, mod.Path)    // queued, low priority
+	runningApplyTask(m, mod.Path+"//a", "tok-a") // running, high priority
 
 	tasks := m.sortedTasks()
 	if len(tasks) != 2 || tasks[0].kind != runner.KindApply || !tasks[0].running {

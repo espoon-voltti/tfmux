@@ -36,6 +36,10 @@ type row struct {
 }
 
 // nodeKey identifies the row's underlying item for ignore/collapse/mark maps.
+// It says "this path", not "this row": a repo whose root is itself a root
+// module (RelPath ".") has the same nodeKey for its repo row and that module's
+// row, and both are meant to share one ignore/collapse entry. Use rowID where
+// the two must be told apart.
 func (r row) nodeKey() string {
 	switch r.kind {
 	case rowRepo:
@@ -46,6 +50,24 @@ func (r row) nodeKey() string {
 		return r.ws.Key()
 	}
 }
+
+// rowID identifies one specific row, so a repo-root module's row is never
+// confused with its repo's row. Anything re-finding the row the cursor was on
+// must key off this, not nodeKey.
+func (r row) rowID() string {
+	switch r.kind {
+	case rowRepo:
+		return repoRowID(r.repo.Path)
+	case rowModule:
+		return moduleRowID(r.mod.Path)
+	default:
+		return workspaceRowID(r.ws.Key())
+	}
+}
+
+func repoRowID(path string) string     { return "repo:" + path }
+func moduleRowID(path string) string   { return "module:" + path }
+func workspaceRowID(key string) string { return "workspace:" + key }
 
 // flatten produces the visible rows honoring ignore, collapse and filter
 // state. Parent rows appear whenever any descendant matches the filter.

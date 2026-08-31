@@ -477,6 +477,60 @@ func TestApplyDoneVanishedWindow(t *testing.T) {
 	}
 }
 
+// A background workspace enumeration for one module inserts rows above a
+// cursor sitting in a different module — reflow must keep the cursor on the
+// node it was on, not merely clamp its index to the (now larger) row count.
+// This is the tree half of the tfmux focus-mismatch bug: attaching to what
+// looked like the selected workspace could silently attach to a different
+// repo's row instead.
+func TestReflowPreservesCursorAcrossBackgroundRowChange(t *testing.T) {
+	m, mod1 := fixtureModel(t)
+	repo := mod1.Repo
+	mod2 := &domain.Module{Repo: repo, Path: "/iac/repo1/envs/staging", RelPath: "envs/staging", TFBin: "terraform"}
+	repo.Modules = append(repo.Modules, mod2)
+	enumerated(t, m, mod2, "staging")
+
+	target := workspaceRowID(mod2.Path + "//staging")
+	m.focusNode(target)
+	if r, ok := m.currentRow(); !ok || r.rowID() != target {
+		t.Fatalf("setup: cursor not on %s (got %+v, ok=%v)", target, r, ok)
+	}
+
+	// mod1 sorts before mod2 in the tree; finishing its enumeration inserts
+	// rows above the cursor exactly the way a real background completion
+	// would (this goes through enumerateDone -> reflow, not a bare reflow
+	// call, so it exercises the real code path).
+	enumerated(t, m, mod1, "dev", "prod")
+
+	if r, ok := m.currentRow(); !ok || r.rowID() != target {
+		t.Errorf("cursor drifted off %s to %+v (ok=%v)", target, r, ok)
+	}
+}
+
+// A repo whose root is itself a root module (RelPath ".") gives its repo row
+// and its module row the same nodeKey, so re-anchoring the cursor by nodeKey
+// finds the repo row first and walks the cursor up off the module row on every
+// reflow.
+func TestReflowKeepsCursorOnRepoRootModuleRow(t *testing.T) {
+	m, _ := fixtureModel(t)
+	repo := &domain.Repo{Path: "/iac/repo2", Name: "repo2", Git: domain.GitStatus{Branch: "main"}}
+	mod := &domain.Module{Repo: repo, Path: repo.Path, RelPath: ".", TFBin: "terraform"}
+	repo.Modules = []*domain.Module{mod}
+	m.repos = append(m.repos, repo)
+	m.reflow()
+
+	m.focusNode(moduleRowID(mod.Path))
+	if r, ok := m.currentRow(); !ok || r.kind != rowModule {
+		t.Fatalf("setup: cursor not on the module row (got %+v, ok=%v)", r, ok)
+	}
+
+	enumerated(t, m, mod, "prod")
+
+	if r, ok := m.currentRow(); !ok || r.kind != rowModule {
+		t.Errorf("cursor left the repo-root module row for %+v (ok=%v)", r, ok)
+	}
+}
+
 func TestQuitConfirmWhilePlanning(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")

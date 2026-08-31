@@ -43,6 +43,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -124,6 +125,7 @@ type Event struct {
 	Workspaces []string         // KindEnumerate, PhaseDone
 	Record     *state.RunRecord // KindPlan, terminal
 	WindowID   string           // KindApply, PhaseRunning (once the window is up)
+	Token      string           // KindApply, PhaseRunning: the window's durable identity — see tmuxctl.WindowFor
 	ApplyExit  *int             // KindApply, PhaseDone (exit code; nil when aborted)
 	Aborted    bool             // KindApply, PhaseDone (window vanished, outcome unknown)
 	Err        string           // PhaseFailed
@@ -629,39 +631,61 @@ func (r *Runner) EnqueueApply(w *domain.Workspace, plannedVersion string) bool {
 		if err != nil {
 			return Event{Err: err.Error()}
 		}
-		windowID, err := r.tmux.LaunchApply(tmuxctl.ApplySpec{
+		// A repo-root module's RelPath is ".", which path.Join drops.
+		windowName := path.Join(m.Repo.Name, m.RelPath, w.Name)
+		windowID, token, err := r.tmux.LaunchApply(tmuxctl.ApplySpec{
 			ModuleDir: m.Path,
 			Workspace: w.Name,
 			TFBin:     m.TFBin,
 			PlanFile:  planFile,
 			ExitFile:  exitFile,
-			Name:      m.Repo.Name + "/" + w.Name,
+			Name:      windowName,
 		})
 		if err != nil {
 			return Event{Err: err.Error()}
 		}
-		emit(Event{Phase: PhaseRunning, WindowID: windowID})
-		return r.pollApply(ctx, m.Path, w.Name, windowID, exitFile)
+		emit(Event{Phase: PhaseRunning, WindowID: windowID, Token: token})
+		return r.pollApply(ctx, exitFile, token)
 	})
 }
 
 // EnqueueApplyPoll re-adopts an apply that was already running in tmux when
-// tfmux last exited: it polls the existing window/exit file without relaunching.
-func (r *Runner) EnqueueApplyPoll(modulePath, workspace, windowID string) bool {
+// tfmux last exited: it polls the existing window/exit file without
+// relaunching. token is the durable identity stamped on the window at launch
+// (see tmuxctl.LaunchApply); the window ID persisted alongside it is not
+// enough to re-find the apply, since window IDs get recycled by a fresh tmux
+// server and a stale one can resolve to an unrelated window.
+//
+// Anything short of "a window still carries this token" means the apply is
+// over rather than still running — including having no tmux to ask, which
+// leaves the outcome unknown just as a vanished window does.
+func (r *Runner) EnqueueApplyPoll(modulePath, workspace, token string) bool {
 	return r.enqueue(KindApply, modulePath+"//"+workspace, modulePath, func(ctx context.Context, emit func(Event)) Event {
 		exitFile, err := r.store.ApplyExitPath(modulePath, workspace)
 		if err != nil {
 			return Event{Err: err.Error()}
 		}
-		emit(Event{Phase: PhaseRunning, WindowID: windowID})
-		return r.pollApply(ctx, modulePath, workspace, windowID, exitFile)
+		if r.tmux == nil {
+			return Event{Aborted: true}
+		}
+		windowID, ok := r.tmux.WindowFor(token)
+		if !ok {
+			return Event{Aborted: true}
+		}
+		emit(Event{Phase: PhaseRunning, WindowID: windowID, Token: token})
+		return r.pollApply(ctx, exitFile, token)
 	})
 }
 
 // pollApply watches the apply: it returns once the exit file appears (the
 // wrapper finished) or the window vanishes (aborted). Canceling the context
 // stops the poll only — the tmux window keeps running.
-func (r *Runner) pollApply(ctx context.Context, modulePath, workspace, windowID, exitFile string) Event {
+//
+// Liveness is checked by token, not by window ID: an ID that still exists in
+// the session could belong to an entirely different window if the tmux
+// server restarted and recycled it, so only "a window still carries this
+// apply's token" counts as still running.
+func (r *Runner) pollApply(ctx context.Context, exitFile, token string) Event {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -669,8 +693,8 @@ func (r *Runner) pollApply(ctx context.Context, modulePath, workspace, windowID,
 			code := parseExit(data)
 			return Event{ApplyExit: &code}
 		}
-		if r.tmux != nil && windowID != "" {
-			if ids, err := r.tmux.ListWindowIDs(); err == nil && !ids[windowID] {
+		if r.tmux != nil {
+			if _, ok := r.tmux.WindowFor(token); !ok {
 				return Event{Aborted: true}
 			}
 		}
