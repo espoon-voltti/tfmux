@@ -78,19 +78,33 @@ type ApplySpec struct {
 	Name      string // window name, display only
 }
 
+// sessionEnvVars are Terraform env vars that carry state from the invoking
+// shell session rather than a deliberate tfmux or user choice — cleared
+// before apply so a value left over in the shell can't override what tfmux
+// itself decides. Mirrors internal/tfexec's own filtering for plan/init.
+var sessionEnvVars = []string{
+	"TF_WORKSPACE", "TF_DATA_DIR", "TF_INPUT",
+	"TF_LOG", "TF_LOG_PATH", "TF_LOG_CORE", "TF_LOG_PROVIDER",
+	"TF_CLI_ARGS", "TF_CLI_ARGS_apply",
+}
+
 // applyScript builds the wrapper: run apply, write the exit code atomically,
 // keep the window open on failure so the error stays inspectable. On success
 // the window closes itself.
 func applyScript(s ApplySpec) string {
 	exit, tmp := shq(s.ExitFile), shq(s.ExitFile+".tmp")
+	var unset strings.Builder
+	for _, v := range sessionEnvVars {
+		unset.WriteString("-u " + v + " ")
+	}
 	return fmt.Sprintf(
 		`cd %s || { echo "tfmux: cd failed"; printf '%%s' 127 > %s && mv %s %s; read _; exit 127; }
-TF_WORKSPACE=%s %s apply -input=false %s
+env %sTF_WORKSPACE=%s %s apply -input=false %s
 ec=$?
 printf '%%s' "$ec" > %s && mv %s %s
 if [ "$ec" -ne 0 ]; then printf '\ntfmux: apply FAILED (exit %%s) — press Enter to close\n' "$ec"; read _; fi`,
 		shq(s.ModuleDir), tmp, tmp, exit,
-		shq(s.Workspace), shq(s.TFBin), shq(s.PlanFile),
+		unset.String(), shq(s.Workspace), shq(s.TFBin), shq(s.PlanFile),
 		tmp, tmp, exit,
 	)
 }

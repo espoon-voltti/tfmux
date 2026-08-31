@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -236,5 +237,41 @@ func TestRunMissingBinary(t *testing.T) {
 	tf := TF{Bin: "/nonexistent/terraform", Dir: t.TempDir()}
 	if _, err := tf.Version(context.Background()); err == nil {
 		t.Error("expected error for missing binary")
+	}
+}
+
+// Regression: a TF_WORKSPACE left over in the invoking shell must not reach
+// a command tfexec itself runs with no workspace (here Version), which would
+// otherwise leak in unfiltered via os.Environ().
+func TestVersionIgnoresInheritedWorkspace(t *testing.T) {
+	tf, logFile := newTF(t)
+	t.Setenv("TF_WORKSPACE", "leaked")
+	if _, err := tf.Version(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cs := calls(t, logFile)
+	if len(cs) != 1 || !strings.Contains(cs[0], " <none> version") {
+		t.Errorf("inherited TF_WORKSPACE leaked into subprocess env: %v", cs)
+	}
+}
+
+func TestFilteredEnvironStripsSessionVars(t *testing.T) {
+	blocked := []string{"TF_WORKSPACE", "TF_DATA_DIR", "TF_INPUT", "TF_LOG", "TF_LOG_PATH", "TF_LOG_CORE", "TF_LOG_PROVIDER", "TF_CLI_ARGS", "TF_CLI_ARGS_apply"}
+	for _, k := range blocked {
+		t.Setenv(k, "leaked")
+	}
+	t.Setenv("TF_VAR_keep_me", "kept")
+
+	env := filteredEnviron()
+	for _, kv := range env {
+		key, _, _ := strings.Cut(kv, "=")
+		for _, b := range blocked {
+			if key == b {
+				t.Errorf("filteredEnviron() leaked %q", kv)
+			}
+		}
+	}
+	if !slices.Contains(env, "TF_VAR_keep_me=kept") {
+		t.Error("filteredEnviron() dropped an unrelated var")
 	}
 }

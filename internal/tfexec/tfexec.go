@@ -8,6 +8,10 @@
 //   - workspaces are selected via the TF_WORKSPACE env var, never
 //     `terraform workspace select` (which would mutate .terraform/environment
 //     shared with the user's shell and other tfmux jobs)
+//   - session-dependent Terraform env vars (TF_WORKSPACE and friends, see
+//     sessionEnvVars) are stripped from the inherited environment before
+//     each command runs, so a value left over in the invoking shell can't
+//     silently override what tfmux itself decides
 //   - every command runs with -input=false so credential prompts fail fast
 //     instead of hanging a worker
 //   - cancellation sends SIGINT first (terraform releases state locks on
@@ -60,7 +64,7 @@ type Result struct {
 func (t TF) run(ctx context.Context, workspace string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, t.Bin, args...)
 	cmd.Dir = t.Dir
-	cmd.Env = append(os.Environ(), "TF_IN_AUTOMATION=1")
+	cmd.Env = append(filteredEnviron(), "TF_IN_AUTOMATION=1")
 	cmd.Env = append(cmd.Env, t.Env...)
 	if workspace != "" {
 		cmd.Env = append(cmd.Env, "TF_WORKSPACE="+workspace)
@@ -91,6 +95,41 @@ func (t TF) run(ctx context.Context, workspace string, args ...string) (Result, 
 		return res, nil
 	}
 	return res, fmt.Errorf("%s %s in %s: %w", t.Bin, strings.Join(args, " "), t.Dir, err)
+}
+
+// sessionEnvVars are Terraform env vars that carry state from the invoking
+// shell session rather than a deliberate tfmux or user choice. tfmux decides
+// each of these itself for every command it runs (workspace via the
+// workspace parameter, -input=false unconditionally, no ambient CLI args, no
+// ambient logging), so a value left over from the shell must not leak into
+// the subprocess and silently override that.
+var sessionEnvVars = []string{
+	"TF_WORKSPACE",
+	"TF_DATA_DIR",
+	"TF_INPUT",
+	"TF_LOG",
+	"TF_LOG_PATH",
+	"TF_LOG_CORE",
+	"TF_LOG_PROVIDER",
+}
+
+// filteredEnviron returns os.Environ() with sessionEnvVars, and any
+// TF_CLI_ARGS / TF_CLI_ARGS_<command> entries, removed.
+func filteredEnviron() []string {
+	blocked := make(map[string]bool, len(sessionEnvVars))
+	for _, k := range sessionEnvVars {
+		blocked[k] = true
+	}
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, _, _ := strings.Cut(kv, "=")
+		if blocked[key] || strings.HasPrefix(key, "TF_CLI_ARGS") {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	return filtered
 }
 
 // initSignatures mark errors that `terraform init -input=false` may fix.
