@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/espoon-voltti/tfmux/internal/config"
 	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/gitstatus"
+	"github.com/espoon-voltti/tfmux/internal/manifest"
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/tfexec"
@@ -203,6 +205,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case discoveryMsg:
 		return m.updateDiscovery(msg)
 
+	case manifestReloadedMsg:
+		return m.updateManifestReloaded(msg)
+
 	case gitStatusMsg:
 		for _, repo := range m.repos {
 			if repo.Path == msg.repoPath {
@@ -289,12 +294,17 @@ func (m *Model) updateDiscovery(msg discoveryMsg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, gitStatusCmd(m.git, repo.Path, 0))
 		for _, mod := range repo.Modules {
 			mod.TFBin = m.cfg.BinFor(repo.Path)
-			if m.ignore[repo.Path] || m.ignore[mod.Path] {
+			if m.moduleHidden(mod) {
 				continue
 			}
-			// Prefer the cached enumeration: listing workspaces hits the
-			// backend and is slow/rate-limited. Refresh is explicit (w / R).
-			if cache, ok := m.store.LoadWorkspaces(mod.Path); ok && !msg.force {
+			if mod.ManifestListed {
+				// The repo manifest is authoritative for listed modules: no
+				// backend enumeration, ever — not even on a forced rediscover.
+				m.applyWorkspaces(mod, mod.ManifestWorkspaces)
+				cmds = append(cmds, loadRunsCmd(m.store, mod, mod.ManifestWorkspaces))
+			} else if cache, ok := m.store.LoadWorkspaces(mod.Path); ok && !msg.force {
+				// Prefer the cached enumeration: listing workspaces hits the
+				// backend and is slow/rate-limited. Refresh is explicit (w / R).
 				m.applyWorkspaces(mod, cache.Workspaces)
 				cmds = append(cmds, loadRunsCmd(m.store, mod, cache.Workspaces))
 			} else if m.runner.EnqueueEnumerate(mod) {
@@ -358,6 +368,74 @@ func resolvePath(p string) string {
 		return r
 	}
 	return filepath.Clean(p)
+}
+
+// updateManifestReloaded applies a re-read of a repo's workspace manifest
+// (from 'w' on a manifest-listed module): re-annotates every already-known
+// module and reflows. It never discovers new directories — that needs a full
+// rediscover (R), which reruns scanRepo — so an entry with no matching
+// existing module is recorded as missing, whether or not its directory now
+// exists on disk.
+func (m *Model) updateManifestReloaded(msg manifestReloadedMsg) (tea.Model, tea.Cmd) {
+	var repo *domain.Repo
+	for _, r := range m.repos {
+		if r.Path == msg.repoPath {
+			repo = r
+			break
+		}
+	}
+	if repo == nil {
+		return m, nil
+	}
+	if msg.err != nil {
+		m.status = "manifest reload failed: " + firstLine(msg.err.Error())
+		return m, nil
+	}
+	if msg.mf == nil {
+		repo.ManifestPath = ""
+		repo.ManifestErr = ""
+		repo.ManifestMissing = nil
+		for _, mod := range repo.Modules {
+			mod.ManifestListed = false
+			mod.ManifestWorkspaces = nil
+		}
+		m.status = "workspace manifest removed — falling back to enumeration"
+		m.reflow()
+		return m, nil
+	}
+
+	repo.ManifestPath = msg.mf.Path
+	repo.ManifestErr = ""
+	repo.ManifestMissing = nil
+	byRelPath := make(map[string]*domain.Module, len(repo.Modules))
+	for _, mod := range repo.Modules {
+		mod.ManifestListed = false
+		mod.ManifestWorkspaces = nil
+		byRelPath[filepath.ToSlash(mod.RelPath)] = mod
+	}
+	var cmds []tea.Cmd
+	for _, entry := range msg.mf.Entries {
+		mod, ok := byRelPath[entry.RootModule]
+		if !ok {
+			repo.ManifestMissing = append(repo.ManifestMissing, entry.RootModule)
+			continue
+		}
+		mod.ManifestListed = true
+		mod.ManifestWorkspaces = entry.Workspaces
+		m.applyWorkspaces(mod, entry.Workspaces)
+		cmds = append(cmds, loadRunsCmd(m.store, mod, entry.Workspaces))
+	}
+	sort.Slice(repo.Modules, func(i, j int) bool { return repo.Modules[i].RelPath < repo.Modules[j].RelPath })
+	m.status = "workspace manifest reloaded"
+	m.reflow()
+	return m, tea.Batch(cmds...)
+}
+
+// moduleHidden reports whether a module is excluded from the normal
+// (non-showIgnored) view: its repo or itself explicitly ignored, or its repo
+// has a manifest that doesn't list it.
+func (m *Model) moduleHidden(mod *domain.Module) bool {
+	return m.ignore[mod.Repo.Path] || m.ignore[mod.Path] || mod.ManifestHidden()
 }
 
 // applyWorkspaces sets a module's workspace list (from cache or a fresh
@@ -486,7 +564,7 @@ func (m *Model) initDone(ev runner.Event) tea.Cmd {
 		// change the workspace list — so only auto-enumerate when the module
 		// has no workspaces yet (e.g. its first init). Otherwise the user
 		// refreshes explicitly (w / R).
-		if mod := m.findModule(ev.ModulePath); mod != nil && len(mod.Workspaces) == 0 && m.runner.EnqueueEnumerate(mod) {
+		if mod := m.findModule(ev.ModulePath); mod != nil && !mod.ManifestListed && len(mod.Workspaces) == 0 && m.runner.EnqueueEnumerate(mod) {
 			m.addTask(runner.KindEnumerate, mod.Path)
 		}
 	}
@@ -838,7 +916,7 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Refresh):
 		return m, m.refresh()
 	case key.Matches(msg, keys.RefreshWorkspaces):
-		m.refreshWorkspaces()
+		return m, m.refreshWorkspaces()
 	case key.Matches(msg, keys.Rediscover):
 		m.discovering = true
 		return m, discoverCmd(m.cfg.Roots, true)
@@ -1086,7 +1164,7 @@ func (m *Model) modulesUnder(r row) []*domain.Module {
 	case rowRepo:
 		var mods []*domain.Module
 		for _, mod := range r.repo.Modules {
-			if !m.ignore[mod.Path] {
+			if !m.moduleHidden(mod) {
 				mods = append(mods, mod)
 			}
 		}
@@ -1097,15 +1175,25 @@ func (m *Model) modulesUnder(r row) []*domain.Module {
 	return nil
 }
 
-// refreshWorkspaces re-enumerates workspaces for the module(s) under the cursor,
-// overwriting the on-disk cache once each enumeration completes.
-func (m *Model) refreshWorkspaces() {
+// refreshWorkspaces re-reads workspaces for the module(s) under the cursor,
+// overwriting the on-disk cache once each enumeration completes. For a
+// module in a repo with a manifest, the manifest — not the backend — is
+// authoritative, so this re-reads that file instead of enumerating.
+func (m *Model) refreshWorkspaces() tea.Cmd {
 	r, ok := m.currentRow()
 	if !ok {
-		return
+		return nil
+	}
+	mods := m.modulesUnder(r)
+	if len(mods) == 0 {
+		return nil
+	}
+	if repo := mods[0].Repo; repo.HasManifest() {
+		m.status = "re-reading workspace manifest…"
+		return reloadManifestCmd(repo.Path)
 	}
 	n := 0
-	for _, mod := range m.modulesUnder(r) {
+	for _, mod := range mods {
 		if m.runner.EnqueueEnumerate(mod) {
 			m.addTask(runner.KindEnumerate, mod.Path)
 			n++
@@ -1115,6 +1203,7 @@ func (m *Model) refreshWorkspaces() {
 		m.status = fmt.Sprintf("re-enumerating workspaces for %d module(s)…", n)
 		m.reflow()
 	}
+	return nil
 }
 
 // initUpgradeCurrent queues `terraform init -upgrade` for the module(s) under
@@ -1198,7 +1287,7 @@ func (m *Model) workspacesUnder(r row) []*domain.Workspace {
 	case rowRepo:
 		var out []*domain.Workspace
 		for _, mod := range r.repo.Modules {
-			if !m.ignore[mod.Path] {
+			if !m.moduleHidden(mod) {
 				out = append(out, mod.Workspaces...)
 			}
 		}
@@ -1242,9 +1331,28 @@ func (m *Model) forgetTasks(key string) {
 	}
 }
 
+// revealModule brings a newly-unignored module up to date: a manifest-listed
+// module is populated straight from the manifest (no enumeration — the
+// manifest is authoritative), otherwise a module that was never enumerated
+// needs it now.
+func (m *Model) revealModule(mod *domain.Module) tea.Cmd {
+	if mod.ManifestListed {
+		m.applyWorkspaces(mod, mod.ManifestWorkspaces)
+		return loadRunsCmd(m.store, mod, mod.ManifestWorkspaces)
+	}
+	if mod.WorkspaceState == domain.WorkspacesUnknown && m.runner.EnqueueEnumerate(mod) {
+		m.addTask(runner.KindEnumerate, mod.Path)
+	}
+	return nil
+}
+
 func (m *Model) toggleIgnore() tea.Cmd {
 	r, ok := m.currentRow()
 	if !ok {
+		return nil
+	}
+	if r.kind == rowModule && r.mod.ManifestHidden() {
+		m.status = "not in " + manifest.FileName + " — edit it to manage this module"
 		return nil
 	}
 	k := r.nodeKey()
@@ -1254,30 +1362,29 @@ func (m *Model) toggleIgnore() tea.Cmd {
 	} else {
 		m.ignore[k] = true
 	}
-	// re-enable: a module that was never enumerated needs it now
-	if wasIgnored && r.kind == rowModule && r.mod.WorkspaceState == domain.WorkspacesUnknown {
-		if m.runner.EnqueueEnumerate(r.mod) {
-			m.addTask(runner.KindEnumerate, r.mod.Path)
-		}
+	var cmds []tea.Cmd
+	if wasIgnored && r.kind == rowModule {
+		cmds = append(cmds, m.revealModule(r.mod))
 	}
 	if wasIgnored && r.kind == rowRepo {
 		for _, mod := range r.repo.Modules {
-			if !m.ignore[mod.Path] && mod.WorkspaceState == domain.WorkspacesUnknown && m.runner.EnqueueEnumerate(mod) {
-				m.addTask(runner.KindEnumerate, mod.Path)
+			if !m.ignore[mod.Path] {
+				cmds = append(cmds, m.revealModule(mod))
 			}
 		}
 	}
 	m.reflow()
 	ig := m.ignore
 	store := m.store
-	return func() tea.Msg {
+	cmds = append(cmds, func() tea.Msg {
 		// copy under the cmd to avoid racing the model
 		snapshot := state.Ignore{}
 		for k, v := range ig {
 			snapshot[k] = v
 		}
 		return savedMsg{err: store.SaveIgnore(snapshot)}
-	}
+	})
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) refresh() tea.Cmd {
@@ -1290,7 +1397,7 @@ func (m *Model) refresh() tea.Cmd {
 		cmds = append(cmds, gitStatusCmd(m.git, repo.Path, gen))
 		m.refreshLeft++
 		for _, mod := range repo.Modules {
-			if !m.ignore[repo.Path] && !m.ignore[mod.Path] {
+			if !m.moduleHidden(mod) {
 				cmds = append(cmds, fingerprintCmd(mod, gen))
 				m.refreshLeft++
 			}

@@ -26,7 +26,14 @@ type Repo struct {
 	Name    string // base name for display
 	Git     GitStatus
 	Modules []*Module
+
+	ManifestPath    string   // absolute path to the repo manifest; "" when the repo has none
+	ManifestErr     string   // repo manifest parse failure; modules behave as without a manifest
+	ManifestMissing []string // manifest entries whose root_module directory doesn't exist
 }
+
+// HasManifest reports whether the repo has a usable repo manifest.
+func (r *Repo) HasManifest() bool { return r.ManifestPath != "" }
 
 // WorkspaceState is a module's last enumeration outcome. In-progress
 // enumeration (queued/running) is tracked as a task, not here.
@@ -50,6 +57,16 @@ type Module struct {
 	WorkspaceState WorkspaceState
 	WorkspaceErr   string // populated when WorkspacesError
 	Workspaces     []*Workspace
+
+	ManifestListed     bool     // true when the repo manifest lists this module
+	ManifestWorkspaces []string // this module's workspaces per the manifest, when ManifestListed
+}
+
+// ManifestHidden reports whether the module should be hidden from the normal
+// (non-showIgnored) view because its repo has a manifest that doesn't list
+// it. A repo with no manifest hides nothing this way.
+func (m *Module) ManifestHidden() bool {
+	return m.Repo.HasManifest() && !m.ManifestListed
 }
 
 // Workspace is one Terraform workspace of a root module.

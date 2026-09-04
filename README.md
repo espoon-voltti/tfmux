@@ -133,6 +133,42 @@ Run `tfmux` for the TUI, or `tfmux ls [--json]` for a scriptable dump.
   (or terraform↔tofu); tfmux records the version at plan time and refuses
   to apply with a different binary.
 
+## The repo manifest
+
+A repo can list its root modules and their valid workspaces explicitly in
+**`.terraform-workspaces.json`** at the repo root ("the repo manifest" — not
+to be confused with tfmux's own per-module workspace-enumeration cache, which
+happens to share the filename `workspaces.json` under the XDG state dir):
+
+```json
+[
+  { "root_module": "terraform/base", "workspaces": ["staging", "prod"] },
+  { "root_module": "terraform/shared", "workspaces": ["default"] }
+]
+```
+
+- `root_module` is repo-root-relative and slash-separated (`terraform/base`,
+  not an absolute path or `./terraform/base`). `_comment` and any other extra
+  fields are ignored. Array order only matters to external sweep tooling
+  (`bin/tf-all.sh` and friends) that reads the same file — tfmux always sorts
+  modules by path for display.
+- **The manifest is authoritative for modules it lists**: tfmux never
+  enumerates their workspaces from the backend, on discovery or on a forced
+  rediscover (`R`). `w` (on a manifest-listed module) and `R` both re-read the
+  file rather than touching the backend.
+- **A module absent from the manifest is hidden**, exactly like an explicitly
+  ignored one, badged "not in manifest" (vs. "ignored") under `Z`. Per-
+  workspace ignoring (`i` on a workspace row) still works normally within a
+  listed module.
+- A listed `root_module` whose directory doesn't exist is reported on its
+  repo's row (`manifest: N missing`); a malformed manifest is reported as a
+  parse error on the repo's row, and that repo's modules behave as if it had
+  no manifest at all.
+- A repo with no `.terraform-workspaces.json` is unaffected — workspaces come
+  from the enumeration cache / backend as before, and `import-workspaces` (see
+  `tfmux help`) remains the legacy way to pre-seed that cache for repos that
+  don't (yet) have a manifest.
+
 ## Development
 
 ```sh

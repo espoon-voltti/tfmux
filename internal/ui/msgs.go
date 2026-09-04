@@ -14,6 +14,7 @@ import (
 	"github.com/espoon-voltti/tfmux/internal/discovery"
 	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/gitstatus"
+	"github.com/espoon-voltti/tfmux/internal/manifest"
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/state"
 )
@@ -80,6 +81,21 @@ func loadLogCmd(id, path string) tea.Cmd {
 type expiredPlansMsg struct {
 	n   int
 	gen int // refresh generation; 0 for non-refresh callers
+}
+
+// manifestReloadedMsg delivers a re-read of a repo's workspace manifest,
+// triggered by 'w' on a manifest-listed module.
+type manifestReloadedMsg struct {
+	repoPath string
+	mf       *manifest.Manifest // nil when the file was deleted
+	err      error
+}
+
+func reloadManifestCmd(repoPath string) tea.Cmd {
+	return func() tea.Msg {
+		mf, err := manifest.Load(repoPath)
+		return manifestReloadedMsg{repoPath: repoPath, mf: mf, err: err}
+	}
 }
 
 type savedMsg struct{ err error }

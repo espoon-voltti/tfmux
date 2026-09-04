@@ -81,8 +81,8 @@ func (m *Model) flatten() []row {
 		}
 		var moduleRows []row
 		for _, mod := range repo.Modules {
-			modIgnored := repoIgnored || m.ignore[mod.Path]
-			if m.ignore[mod.Path] && !m.showIgnored {
+			modHidden := m.moduleHidden(mod)
+			if modHidden && !m.showIgnored {
 				continue
 			}
 			var wsRows []row
@@ -100,7 +100,7 @@ func (m *Model) flatten() []row {
 				continue
 			}
 			moduleRows = append(moduleRows, row{kind: rowModule, repo: repo, mod: mod})
-			if !m.collapsed[mod.Path] && !modIgnored {
+			if !m.collapsed[mod.Path] && !modHidden {
 				moduleRows = append(moduleRows, wsRows...)
 			}
 		}
@@ -132,11 +132,14 @@ func matchesFilter(filter string, repo *domain.Repo, mod *domain.Module, ws *dom
 // renderRow renders one line of the tree at the given width.
 func (m *Model) renderRow(r row, selected bool, width int) string {
 	var line string
-	if m.ignore[r.nodeKey()] {
+	switch {
+	case m.ignore[r.nodeKey()]:
 		// Ignored items are only visible under Z; render them uniformly muted
 		// (single style over plain text) so they read as inactive at a glance.
-		line = m.renderIgnoredRow(r)
-	} else {
+		line = m.renderIgnoredRow(r, "(ignored)")
+	case r.kind == rowModule && r.mod.ManifestHidden():
+		line = m.renderIgnoredRow(r, "(not in manifest)")
+	default:
 		switch r.kind {
 		case rowRepo:
 			line = m.renderRepoRow(r.repo)
@@ -160,10 +163,11 @@ func (m *Model) renderRow(r row, selected bool, width int) string {
 	return line
 }
 
-// renderIgnoredRow renders an explicitly-ignored node as a single muted,
-// plain-text line — keeping the tree indentation but dropping the status cell,
-// which is irrelevant for items the user has chosen to skip.
-func (m *Model) renderIgnoredRow(r row) string {
+// renderIgnoredRow renders a hidden node (explicitly ignored, or manifest-
+// hidden) as a single muted, plain-text line tagged with reason — keeping the
+// tree indentation but dropping the status cell, which is irrelevant for
+// items the user isn't managing right now.
+func (m *Model) renderIgnoredRow(r row, reason string) string {
 	var label string
 	switch r.kind {
 	case rowRepo:
@@ -181,7 +185,7 @@ func (m *Model) renderIgnoredRow(r row) string {
 	case rowWorkspace:
 		label = fmt.Sprintf("      %s", r.ws.Name)
 	}
-	return styleIgnored.Render(label + "  (ignored)")
+	return styleIgnored.Render(label + "  " + reason)
 }
 
 func (m *Model) renderRepoRow(repo *domain.Repo) string {
@@ -207,6 +211,12 @@ func (m *Model) renderRepoRow(repo *domain.Repo) string {
 	}
 	if g.Behind > 0 {
 		s += styleDim.Render(fmt.Sprintf(" ↓%d", g.Behind))
+	}
+	switch {
+	case repo.ManifestErr != "":
+		s += "  " + styleError.Render("manifest: "+firstLine(repo.ManifestErr))
+	case len(repo.ManifestMissing) > 0:
+		s += "  " + styleDim.Render(fmt.Sprintf("manifest: %d missing", len(repo.ManifestMissing)))
 	}
 	return s
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/hashicorp/hcl/v2/hclparse"
 
 	"github.com/espoon-voltti/tfmux/internal/domain"
+	"github.com/espoon-voltti/tfmux/internal/manifest"
 )
 
 // skippedDirs are never descended into while scanning inside a repo.
@@ -104,8 +105,50 @@ func scanRepo(repoPath string) *domain.Repo {
 		}
 		return nil
 	})
+	applyManifest(repo)
 	sort.Slice(repo.Modules, func(i, j int) bool { return repo.Modules[i].RelPath < repo.Modules[j].RelPath })
 	return repo
+}
+
+// applyManifest loads repo's repo manifest, if any, and annotates its
+// modules: a listed module gets its manifest workspaces; an entry with no
+// discovered module becomes a module in its own right when the directory
+// exists (the manifest is authoritative even where IsRootModule missed it),
+// otherwise it's recorded as missing.
+func applyManifest(repo *domain.Repo) {
+	mf, err := manifest.Load(repo.Path)
+	if err != nil {
+		repo.ManifestErr = err.Error()
+		return
+	}
+	if mf == nil {
+		return
+	}
+	repo.ManifestPath = mf.Path
+
+	byRelPath := make(map[string]*domain.Module, len(repo.Modules))
+	for _, mod := range repo.Modules {
+		byRelPath[filepath.ToSlash(mod.RelPath)] = mod
+	}
+	for _, entry := range mf.Entries {
+		if mod, ok := byRelPath[entry.RootModule]; ok {
+			mod.ManifestListed = true
+			mod.ManifestWorkspaces = entry.Workspaces
+			continue
+		}
+		dir := filepath.Join(repo.Path, filepath.FromSlash(entry.RootModule))
+		if info, statErr := os.Stat(dir); statErr == nil && info.IsDir() {
+			repo.Modules = append(repo.Modules, &domain.Module{
+				Repo:               repo,
+				Path:               dir,
+				RelPath:            filepath.FromSlash(entry.RootModule),
+				ManifestListed:     true,
+				ManifestWorkspaces: entry.Workspaces,
+			})
+			continue
+		}
+		repo.ManifestMissing = append(repo.ManifestMissing, entry.RootModule)
+	}
 }
 
 // IsRootModule reports whether dir's *.tf files mark it as a Terraform root

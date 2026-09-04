@@ -68,7 +68,8 @@ commands:
   ls         print discovered repos, modules and git status
   ls --json  same, as JSON
   import-workspaces
-             seed module workspace lists from a JSON object
+             legacy seeding for repos without a repo manifest: seed module
+             workspace lists from a JSON object
              ({"<module path>": ["ws", …], …}) read on stdin
   version    print version
 `)
@@ -119,8 +120,18 @@ func runLs(args []string) error {
 	}
 	for _, repo := range repos {
 		fmt.Printf("%s  %s\n", repo.Path, gitSummary(repo.Git))
+		if repo.ManifestErr != "" {
+			fmt.Printf("  [manifest error: %s]\n", repo.ManifestErr)
+		}
+		for _, name := range repo.ManifestMissing {
+			fmt.Printf("  [manifest: %s not found]\n", name)
+		}
 		for _, m := range repo.Modules {
-			fmt.Printf("  %s\n", m.RelPath)
+			if m.ManifestListed {
+				fmt.Printf("  %s  [manifest]\n", m.RelPath)
+			} else {
+				fmt.Printf("  %s\n", m.RelPath)
+			}
 		}
 	}
 	return nil
@@ -157,8 +168,10 @@ func short(oid string) string {
 }
 
 type lsModule struct {
-	Path    string `json:"path"`
-	RelPath string `json:"rel_path"`
+	Path               string   `json:"path"`
+	RelPath            string   `json:"rel_path"`
+	ManifestListed     bool     `json:"manifest_listed,omitempty"`
+	ManifestWorkspaces []string `json:"manifest_workspaces,omitempty"`
 }
 
 type lsRepo struct {
@@ -170,6 +183,10 @@ type lsRepo struct {
 	Behind   int        `json:"behind"`
 	GitError string     `json:"git_error,omitempty"`
 	Modules  []lsModule `json:"modules"`
+
+	ManifestPath    string   `json:"manifest_path,omitempty"`
+	ManifestError   string   `json:"manifest_error,omitempty"`
+	ManifestMissing []string `json:"manifest_missing,omitempty"`
 }
 
 func printJSON(repos []*domain.Repo) error {
@@ -179,13 +196,19 @@ func printJSON(repos []*domain.Repo) error {
 			Path:   r.Path,
 			Branch: r.Git.Branch, Detached: r.Git.Detached,
 			Dirty: r.Git.Dirty, Ahead: r.Git.Ahead, Behind: r.Git.Behind,
-			Modules: make([]lsModule, 0, len(r.Modules)),
+			Modules:         make([]lsModule, 0, len(r.Modules)),
+			ManifestPath:    r.ManifestPath,
+			ManifestError:   r.ManifestErr,
+			ManifestMissing: r.ManifestMissing,
 		}
 		if r.Git.Err != nil {
 			lr.GitError = r.Git.Err.Error()
 		}
 		for _, m := range r.Modules {
-			lr.Modules = append(lr.Modules, lsModule{Path: m.Path, RelPath: m.RelPath})
+			lr.Modules = append(lr.Modules, lsModule{
+				Path: m.Path, RelPath: m.RelPath,
+				ManifestListed: m.ManifestListed, ManifestWorkspaces: m.ManifestWorkspaces,
+			})
 		}
 		out = append(out, lr)
 	}
@@ -194,12 +217,13 @@ func printJSON(repos []*domain.Repo) error {
 	return enc.Encode(out)
 }
 
-// runImportWorkspaces reads a JSON object mapping absolute module paths to
-// their workspace lists from stdin and writes each into the workspace cache, as
-// if enumerated now. This lets external tooling (e.g. a setup script) pre-seed
-// the workspaces a module should show without hitting the backend. The cache is
-// authoritative until the user re-enumerates from the real backend ('w' in the
-// TUI), so seeding is fully reversible.
+// runImportWorkspaces is legacy seeding for repos without a repo manifest
+// (see internal/manifest): it reads a JSON object mapping absolute module
+// paths to their workspace lists from stdin and writes each into the
+// workspace cache, as if enumerated now. This lets external tooling (e.g. a
+// setup script) pre-seed the workspaces a module should show without hitting
+// the backend. The cache is authoritative until the user re-enumerates from
+// the real backend ('w' in the TUI), so seeding is fully reversible.
 func runImportWorkspaces() error {
 	var manifest map[string][]string
 	if err := json.NewDecoder(os.Stdin).Decode(&manifest); err != nil {
