@@ -1,0 +1,24 @@
+// SPDX-FileCopyrightText: 2026 City of Espoo
+//
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "automergeStrategy": "rebase",
+  "minimumReleaseAge": "3 days",
+  "packageRules": [
+    {
+      "matchManagers": ["gomod"],
+      "groupName": "All Go dependencies",
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "automerge": true,
+    }
+  ]
+}
