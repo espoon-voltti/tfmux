@@ -7,7 +7,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.8
-	github.com/charmbracelet/x/exp/teatest v0.0.0-20260902165432-6f6ad8b37b0a
+	github.com/charmbracelet/x/exp/teatest v0.0.0-20260906004030-3986e9119cf9
 	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/hashicorp/terraform-json v0.28.0
 	github.com/pelletier/go-toml/v2 v2.4.3
