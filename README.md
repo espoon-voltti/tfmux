@@ -118,7 +118,10 @@ Run `tfmux` for the TUI, or `tfmux ls [--json]` for a scriptable dump.
   same module dir concurrently; cross-module parallelism provides the speed.
 - **Init is lazy and never `-upgrade`** (that rewrites the lock file —
   explicit `I` only). All commands run `-input=false` so missing credentials
-  fail fast instead of hanging a worker.
+  fail fast instead of hanging a worker. Tasks queued in a module wait for
+  an init queued there; if that init fails, its error shows on the module row
+  (`enter` for the full output) and the waiting tasks are canceled rather
+  than run against a half-initialized module.
 - **Concurrent inits are capped when you use a plugin cache.** A shared
   Terraform/OpenTofu provider plugin cache (`plugin_cache_dir` /
   `TF_PLUGIN_CACHE_DIR`) only tolerates one `terraform init` at a time —

@@ -5,6 +5,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -56,4 +57,28 @@ func TestInitDoneEnumeratesWhenNoWorkspaces(t *testing.T) {
 		t.Fatal("init -upgrade should auto-enumerate when the module has no workspaces")
 	}
 	drainKind(t, m, runner.KindEnumerate, 1)
+}
+
+// A failed init leaves its error on the module row (headlined by terraform's
+// "Error:" line, not the progress chatter before it) until an init succeeds.
+func TestInitFailedShowsOnModuleRow(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "default")
+	m.updateRunnerEvent(runner.Event{
+		Kind: runner.KindInit, Key: mod.Path, ModulePath: mod.Path, Phase: runner.PhaseFailed,
+		Err:                "Initializing the backend...\n\nError: Failed to query available provider packages\n",
+		CanceledDependents: 2,
+	})
+	row := m.renderModuleRow(mod)
+	if !strings.Contains(row, "init error: Error: Failed to query available provider packages") {
+		t.Errorf("module row = %q", row)
+	}
+	if !strings.Contains(m.status, "2 queued canceled") {
+		t.Errorf("status = %q", m.status)
+	}
+
+	initDone(m, mod.Path)
+	if row := m.renderModuleRow(mod); strings.Contains(row, "init error") {
+		t.Errorf("init error still shown after a successful init: %q", row)
+	}
 }

@@ -597,3 +597,91 @@ func TestQueuedInitBlocksPlanInSameModule(t *testing.T) {
 		}
 	}
 }
+
+// A failed init -upgrade cancels the plan/output queued behind it in its
+// module instead of letting them run (and lazily re-init) against a module the
+// upgrade left broken. Work in other modules is unaffected.
+func TestFailedInitCancelsQueuedTasksInModule(t *testing.T) {
+	f := newFixture(t, 4)
+	t.Setenv("TFMUX_FAKE_SLEEP", "1")
+	t.Setenv("TFMUX_FAKE_INIT_STDERR", "Error: Failed to query available provider packages")
+	m := f.newModule(t, "mod1")
+	other := f.newModule(t, "mod2")
+
+	if !f.runner.EnqueueInitUpgrade(m) {
+		t.Fatal("init enqueue refused")
+	}
+	f.runner.EnqueuePlan(&domain.Workspace{Module: m, Name: "prod"})
+	f.runner.EnqueueOutput(&domain.Workspace{Module: m, Name: "staging"})
+	otherPlan := &domain.Workspace{Module: other, Name: "prod"}
+	f.runner.EnqueuePlan(otherPlan)
+
+	phases := map[string]Phase{}
+	var initEv Event
+	timeout := time.After(30 * time.Second)
+	for len(phases) < 4 {
+		select {
+		case ev := <-f.runner.Events:
+			if !ev.Phase.Terminal() {
+				continue
+			}
+			phases[ev.TaskID()] = ev.Phase
+			if ev.Kind == KindInit {
+				initEv = ev
+			}
+		case <-timeout:
+			t.Fatalf("timed out; got %v", phases)
+		}
+	}
+
+	if initEv.Phase != PhaseFailed || !strings.Contains(initEv.Err, "Failed to query") {
+		t.Errorf("init: phase = %v, err = %q", initEv.Phase, initEv.Err)
+	}
+	if initEv.CanceledDependents != 2 {
+		t.Errorf("CanceledDependents = %d, want 2", initEv.CanceledDependents)
+	}
+	for _, id := range []string{TaskID(KindPlan, m.Path+"//prod"), TaskID(KindOutput, m.Path+"//staging")} {
+		if phases[id] != PhaseCanceled {
+			t.Errorf("%s: phase = %v, want canceled", id, phases[id])
+		}
+	}
+	if p := phases[TaskID(KindPlan, otherPlan.Key())]; p != PhaseDone {
+		t.Errorf("other module's plan: phase = %v, want done", p)
+	}
+	if f.runner.Running(m.Path + "//prod") {
+		t.Error("canceled plan still registered as in flight")
+	}
+
+	data, err := os.ReadFile(f.logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := filepath.EvalSymlinks(m.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 5 && fields[2] == dir && fields[4] != "init" {
+			t.Errorf("terraform ran in the failed module after init: %s", line)
+		}
+	}
+}
+
+// A plan that deferred to a lazy init is canceled when that init fails,
+// rather than failing itself with a module-not-initialized error.
+func TestFailedLazyInitCancelsDeferredPlan(t *testing.T) {
+	f := newFixture(t, 2)
+	t.Setenv("TFMUX_FAKE_INIT_STDERR", "Error: Failed to get existing workspaces")
+	m := f.newUninitModule(t, "mod1")
+	ws := &domain.Workspace{Module: m, Name: "prod"}
+	f.runner.EnqueuePlan(ws)
+
+	initEv := waitTerminal(t, f.runner.Events, KindInit, 1)[0]
+	if initEv.Phase != PhaseFailed || initEv.CanceledDependents != 1 {
+		t.Errorf("init: phase = %v, canceled dependents = %d", initEv.Phase, initEv.CanceledDependents)
+	}
+	if ev := waitTerminal(t, f.runner.Events, KindPlan, 1)[0]; ev.Phase != PhaseCanceled {
+		t.Errorf("plan: phase = %v, err = %q", ev.Phase, ev.Err)
+	}
+}

@@ -58,6 +58,8 @@ type Module struct {
 	WorkspaceErr   string // populated when WorkspacesError
 	Workspaces     []*Workspace
 
+	InitErr string // output of the last terraform init, when it failed
+
 	ManifestListed     bool     // true when the repo manifest lists this module
 	ManifestWorkspaces []string // this module's workspaces per the manifest, when ManifestListed
 }

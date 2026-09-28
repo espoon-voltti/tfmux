@@ -22,6 +22,8 @@ import (
 //	                      normally (exit code defaults to 1 when set);
 //	                      simulates specific failures like a state lock
 //	TFMUX_FAKE_OUTPUT_EXIT exit code for `output` (default 0)
+//	TFMUX_FAKE_INIT_STDERR text `init` writes to stderr before failing with
+//	                      exit 1, leaving the module as it was
 //	TFMUX_FAKE_NEED_INIT  if set, plan/workspace-list fail with an
 //	                      init-required message until `init` has run
 //	                      (tracked via a sentinel file next to the log)
@@ -35,6 +37,10 @@ log start
 finish() { log end; exit "$1"; }
 case "$1" in
   init)
+    if [ -n "$TFMUX_FAKE_INIT_STDERR" ]; then
+      echo "$TFMUX_FAKE_INIT_STDERR" >&2
+      finish 1
+    fi
     [ -n "$TFMUX_FAKE_NEED_INIT" ] && touch "$TFMUX_FAKE_LOG.initialized"
     mkdir -p .terraform
     echo "Terraform has been successfully initialized!"

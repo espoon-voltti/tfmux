@@ -555,16 +555,26 @@ func (m *Model) enumerateDone(ev runner.Event) tea.Cmd {
 }
 
 func (m *Model) initDone(ev runner.Event) tea.Cmd {
+	mod := m.findModule(ev.ModulePath)
 	switch ev.Phase {
 	case runner.PhaseFailed:
-		m.status = "init failed: " + firstLine(ev.Err)
+		if mod != nil {
+			mod.InitErr = ev.Err
+		}
+		m.status = "init failed: " + errorLine(ev.Err)
+		if n := ev.CanceledDependents; n > 0 {
+			m.status += fmt.Sprintf(" — %d queued canceled", n)
+		}
 	case runner.PhaseDone:
+		if mod != nil {
+			mod.InitErr = ""
+		}
 		m.status = "init done"
 		// Enumerating hits the backend (slow/rate-limited), and init doesn't
 		// change the workspace list — so only auto-enumerate when the module
 		// has no workspaces yet (e.g. its first init). Otherwise the user
 		// refreshes explicitly (w / R).
-		if mod := m.findModule(ev.ModulePath); mod != nil && !mod.ManifestListed && len(mod.Workspaces) == 0 && m.runner.EnqueueEnumerate(mod) {
+		if mod != nil && !mod.ManifestListed && len(mod.Workspaces) == 0 && m.runner.EnqueueEnumerate(mod) {
 			m.addTask(runner.KindEnumerate, mod.Path)
 		}
 	}
@@ -1586,24 +1596,31 @@ func (m *Model) showOutput(ws *domain.Workspace) tea.Cmd {
 }
 
 // viewModule is the "show me what's happening" action for a module: follow a
-// running init/enumerate log, or fall back to the last enumeration error.
+// running init/enumerate log, or fall back to the last init or enumeration
+// error.
 func (m *Model) viewModule(mod *domain.Module) tea.Cmd {
 	switch {
 	case m.hasTask(runner.KindInit, mod.Path):
 		return m.openLog(runner.KindInit, mod.Path)
 	case m.hasTask(runner.KindEnumerate, mod.Path):
 		return m.openLog(runner.KindEnumerate, mod.Path)
+	case mod.InitErr != "":
+		m.showModuleError(mod, mod.InitErr)
 	case mod.WorkspaceState == domain.WorkspacesError:
-		m.detailFollow = ""
-		m.detailKey = "err:" + mod.Path
-		m.detailTitle = m.detailTitleFor(runner.KindEnumerate, mod.Path)
-		m.detail.SetContent(colorizePlanLog(mod.WorkspaceErr))
-		m.detail.GotoTop()
-		m.focus = focusDetail
+		m.showModuleError(mod, mod.WorkspaceErr)
 	default:
 		m.status = "nothing running for this module"
 	}
 	return nil
+}
+
+func (m *Model) showModuleError(mod *domain.Module, content string) {
+	m.detailFollow = ""
+	m.detailKey = "err:" + mod.Path
+	m.detailTitle = m.detailTitleFor(runner.KindEnumerate, mod.Path)
+	m.detail.SetContent(colorizePlanLog(content))
+	m.detail.GotoTop()
+	m.focus = focusDetail
 }
 
 // attachWindow resolves token to whatever window currently carries it (it

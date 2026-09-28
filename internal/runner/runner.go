@@ -30,7 +30,8 @@
 //     without touching `parallelism`. A queued or running init also holds back
 //     every other kind of task in that module (an apply excepted, since it
 //     preempts), so a throttled init can't be overtaken by the plan waiting
-//     on it.
+//     on it. A failed init cancels the tasks queued behind it in its module
+//     rather than letting them run against a module it left broken.
 //
 // Applies run in a tmux window (they're interactive, long-running, and must
 // outlive tfmux) but still occupy a pool slot: the task launches the window,
@@ -129,6 +130,11 @@ type Event struct {
 	ApplyExit  *int             // KindApply, PhaseDone (exit code; nil when aborted)
 	Aborted    bool             // KindApply, PhaseDone (window vanished, outcome unknown)
 	Err        string           // PhaseFailed
+
+	// CanceledDependents counts the module's queued tasks dropped because they
+	// were waiting on this failed init (KindInit, PhaseFailed). Each still
+	// gets its own PhaseCanceled event.
+	CanceledDependents int
 
 	// requeueFn, when set, means the task discovered it needs init instead of
 	// finishing: execute() runs it (after releasing this task's slot/module/
@@ -294,6 +300,12 @@ func (r *Runner) execute(t *task) {
 	}
 	delete(r.busyModule, t.modulePath)
 	delete(r.inflight, t.id())
+	// Dropped under the same lock that frees the module, so the scheduler
+	// can't dispatch a dependent in between.
+	var dependents []*task
+	if t.kind == KindInit && out.Phase == PhaseFailed {
+		dependents = r.dropInitDependentsLocked(t.modulePath)
+	}
 	r.cond.Signal()
 	r.mu.Unlock()
 
@@ -302,7 +314,29 @@ func (r *Runner) execute(t *task) {
 		return
 	}
 	out.Kind, out.Key, out.ModulePath = t.kind, t.key, t.modulePath
+	out.CanceledDependents = len(dependents)
 	r.emit(out)
+	for _, d := range dependents {
+		r.emit(Event{Kind: d.kind, Key: d.key, ModulePath: d.modulePath, Phase: PhaseCanceled})
+	}
+}
+
+// dropInitDependentsLocked removes the queued tasks that initQueuedLocked was
+// holding back in the module: everything but applies.
+func (r *Runner) dropInitDependentsLocked(modulePath string) []*task {
+	var dropped []*task
+	kept := r.ready[:0]
+	for _, q := range r.ready {
+		if q.modulePath == modulePath && q.kind != KindApply {
+			delete(r.inflight, q.id())
+			q.cancel()
+			dropped = append(dropped, q)
+			continue
+		}
+		kept = append(kept, q)
+	}
+	r.ready = kept
+	return dropped
 }
 
 // runJob acquires the cross-process module lock, runs the task body, and

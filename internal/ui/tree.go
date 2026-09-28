@@ -232,6 +232,8 @@ func (m *Model) renderModuleRow(mod *domain.Module) string {
 		s += m.taskBadge(m.task(runner.KindInit, mod.Path), "init running", "init queued")
 	case m.task(runner.KindEnumerate, mod.Path) != nil:
 		s += m.taskBadge(m.task(runner.KindEnumerate, mod.Path), "listing workspaces", "workspaces queued")
+	case mod.InitErr != "":
+		s += styleError.Render("✗ init error: " + errorLine(mod.InitErr))
 	case mod.WorkspaceState == domain.WorkspacesUnknown:
 		s += styleDim.Render("…")
 	case mod.WorkspaceState == domain.WorkspacesError:
@@ -327,4 +329,16 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// errorLine picks the headline of terraform output: its first "Error:" line,
+// or the first line when there is none.
+func errorLine(s string) string {
+	for line := range strings.SplitSeq(s, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "│"))
+		if strings.HasPrefix(line, "Error:") {
+			return line
+		}
+	}
+	return firstLine(s)
 }
