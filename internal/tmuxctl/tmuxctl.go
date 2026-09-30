@@ -76,6 +76,17 @@ type ApplySpec struct {
 	PlanFile  string
 	ExitFile  string // removed before launch; appears atomically when done
 	Name      string // window name, display only
+
+	// ApplyCommand, when set, is the complete apply shell line of a module
+	// with manifest command templates (see tfexec.ApplyCommand). It runs with
+	// TFMUX_WORKSPACE and TFMUX_TF_BIN exported and no TF_WORKSPACE. Empty
+	// means the default `TF_WORKSPACE=<ws> <bin> apply` line.
+	ApplyCommand string
+	// InitCommand, when set, runs before ApplyCommand because the module dir
+	// is not initialised for Workspace; its success is recorded by writing
+	// Workspace to InitMarkerFile before apply starts.
+	InitCommand    string
+	InitMarkerFile string
 }
 
 // sessionEnvVars are Terraform env vars that carry state from the invoking
@@ -85,7 +96,7 @@ type ApplySpec struct {
 var sessionEnvVars = []string{
 	"TF_WORKSPACE", "TF_DATA_DIR", "TF_INPUT",
 	"TF_LOG", "TF_LOG_PATH", "TF_LOG_CORE", "TF_LOG_PROVIDER",
-	"TF_CLI_ARGS", "TF_CLI_ARGS_apply",
+	"TF_CLI_ARGS", "TF_CLI_ARGS_apply", "TF_CLI_ARGS_init",
 }
 
 // applyScript builds the wrapper: run apply, write the exit code atomically,
@@ -93,20 +104,52 @@ var sessionEnvVars = []string{
 // the window closes itself.
 func applyScript(s ApplySpec) string {
 	exit, tmp := shq(s.ExitFile), shq(s.ExitFile+".tmp")
-	var unset strings.Builder
-	for _, v := range sessionEnvVars {
-		unset.WriteString("-u " + v + " ")
-	}
-	return fmt.Sprintf(
-		`cd %s || { echo "tfmux: cd failed"; printf '%%s' 127 > %s && mv %s %s; read _; exit 127; }
+	if s.ApplyCommand == "" {
+		var unset strings.Builder
+		for _, v := range sessionEnvVars {
+			unset.WriteString("-u " + v + " ")
+		}
+		return fmt.Sprintf(
+			`cd %s || { echo "tfmux: cd failed"; printf '%%s' 127 > %s && mv %s %s; read _; exit 127; }
 env %sTF_WORKSPACE=%s %s apply -input=false %s
 ec=$?
 printf '%%s' "$ec" > %s && mv %s %s
 if [ "$ec" -ne 0 ]; then printf '\ntfmux: apply FAILED (exit %%s) — press Enter to close\n' "$ec"; read _; fi`,
+			shq(s.ModuleDir), tmp, tmp, exit,
+			unset.String(), shq(s.Workspace), shq(s.TFBin), shq(s.PlanFile),
+			tmp, tmp, exit,
+		)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b,
+		`cd %s || { echo "tfmux: cd failed"; printf '%%s' 127 > %s && mv %s %s; read _; exit 127; }
+unset %s
+export TFMUX_WORKSPACE=%s TFMUX_TF_BIN=%s
+`,
 		shq(s.ModuleDir), tmp, tmp, exit,
-		unset.String(), shq(s.Workspace), shq(s.TFBin), shq(s.PlanFile),
-		tmp, tmp, exit,
+		strings.Join(sessionEnvVars, " "),
+		shq(s.Workspace), shq(s.TFBin),
 	)
+	if s.InitCommand != "" {
+		marker, mtmp := shq(s.InitMarkerFile), shq(s.InitMarkerFile+".tmp")
+		fmt.Fprintf(&b,
+			`%s
+ec=$?
+if [ "$ec" -ne 0 ]; then printf '%%s' "$ec" > %s && mv %s %s; printf '\ntfmux: init FAILED (exit %%s) — press Enter to close\n' "$ec"; read _; exit "$ec"; fi
+printf '%%s' %s > %s && mv %s %s
+`,
+			s.InitCommand, tmp, tmp, exit,
+			shq(s.Workspace), mtmp, mtmp, marker,
+		)
+	}
+	fmt.Fprintf(&b,
+		`%s
+ec=$?
+printf '%%s' "$ec" > %s && mv %s %s
+if [ "$ec" -ne 0 ]; then printf '\ntfmux: apply FAILED (exit %%s) — press Enter to close\n' "$ec"; read _; fi`,
+		s.ApplyCommand, tmp, tmp, exit,
+	)
+	return b.String()
 }
 
 // LaunchApply opens a new window running the apply and returns its tmux

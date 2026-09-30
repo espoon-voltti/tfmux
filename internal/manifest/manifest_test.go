@@ -72,3 +72,32 @@ func TestLoadErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadTemplates(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, `[
+	  {"root_module": "terraform/app", "workspaces": ["prod"],
+	   "init": "  terraform init -backend-config=$TFMUX_WORKSPACE.hcl ",
+	   "plan": "terraform plan -var-file=$TFMUX_WORKSPACE.tfvars",
+	   "apply": "   "},
+	  {"root_module": "terraform/shared", "workspaces": ["default"]}
+	]`)
+	m, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := m.Entries[0]
+	if app.Init != "terraform init -backend-config=$TFMUX_WORKSPACE.hcl" {
+		t.Errorf("Init = %q, want it trimmed", app.Init)
+	}
+	if app.Plan != "terraform plan -var-file=$TFMUX_WORKSPACE.tfvars" {
+		t.Errorf("Plan = %q", app.Plan)
+	}
+	if app.Apply != "" {
+		t.Errorf("blank Apply = %q, want empty", app.Apply)
+	}
+	shared := m.Entries[1]
+	if shared.Init != "" || shared.Plan != "" || shared.Apply != "" {
+		t.Errorf("absent templates parsed as %+v", shared)
+	}
+}

@@ -27,6 +27,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/espoon-voltti/tfmux/internal/config"
+	"github.com/espoon-voltti/tfmux/internal/discovery"
 	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/gitstatus"
 	"github.com/espoon-voltti/tfmux/internal/manifest"
@@ -398,6 +399,7 @@ func (m *Model) updateManifestReloaded(msg manifestReloadedMsg) (tea.Model, tea.
 		for _, mod := range repo.Modules {
 			mod.ManifestListed = false
 			mod.ManifestWorkspaces = nil
+			mod.Templates = nil
 		}
 		m.status = "workspace manifest removed — falling back to enumeration"
 		m.reflow()
@@ -411,6 +413,7 @@ func (m *Model) updateManifestReloaded(msg manifestReloadedMsg) (tea.Model, tea.
 	for _, mod := range repo.Modules {
 		mod.ManifestListed = false
 		mod.ManifestWorkspaces = nil
+		mod.Templates = nil
 		byRelPath[filepath.ToSlash(mod.RelPath)] = mod
 	}
 	var cmds []tea.Cmd
@@ -422,6 +425,7 @@ func (m *Model) updateManifestReloaded(msg manifestReloadedMsg) (tea.Model, tea.
 		}
 		mod.ManifestListed = true
 		mod.ManifestWorkspaces = entry.Workspaces
+		mod.Templates = discovery.TemplatesFor(entry)
 		m.applyWorkspaces(mod, entry.Workspaces)
 		cmds = append(cmds, loadRunsCmd(m.store, mod, entry.Workspaces))
 	}

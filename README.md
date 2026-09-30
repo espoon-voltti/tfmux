@@ -108,7 +108,10 @@ Run `tfmux` for the TUI, or `tfmux ls [--json]` for a scriptable dump.
   a finished task shows the captured log. Useful when an enumeration stalls on
   a throttling backend and you want to see what it's doing.
 - **`TF_WORKSPACE`, never `workspace select`** — selecting would mutate
-  `.terraform/environment` shared with your shell and other jobs.
+  `.terraform/environment` shared with your shell and other jobs. Modules with
+  manifest command templates (see below) are the one exception: their
+  "workspace" is a logical name handed to the templates as `TFMUX_WORKSPACE`,
+  and `TF_WORKSPACE` is never set for them.
 - **Workspace lists are cached.** Enumerating workspaces hits the backend
   (S3/DynamoDB, etc.) and is slow and easily rate-limited, so the list is
   persisted per module and reused on the next launch. Re-enumerate explicitly
@@ -171,6 +174,43 @@ happens to share the filename `workspaces.json` under the XDG state dir):
   from the enumeration cache / backend as before, and `import-workspaces` (see
   `tfmux help`) remains the legacy way to pre-seed that cache for repos that
   don't (yet) have a manifest.
+
+### Command templates
+
+Not every repo selects an environment with a terraform workspace. When each
+environment is instead a separate backend picked with `-backend-config`, a
+`-var-file`, an `AWS_PROFILE` or the like, an entry can give `init`, `plan`
+and/or `apply` as shell snippets:
+
+```json
+[
+  {
+    "root_module": "terraform/app",
+    "workspaces": ["staging", "prod"],
+    "init": "terraform init -reconfigure -backend-config=backend-$TFMUX_WORKSPACE.hcl",
+    "plan": "terraform plan -var-file=$TFMUX_WORKSPACE.tfvars"
+  }
+]
+```
+
+- tfmux runs a template with `/bin/sh -c` in the module directory, with
+  `TFMUX_WORKSPACE` set to the entry's workspace name and `TFMUX_TF_BIN` to the
+  resolved terraform binary. Shell parameter expansion works, so
+  `${TFMUX_WORKSPACE##*-}` turns `myproject-prod` into `prod`.
+- tfmux **appends its own flags** after the snippet: `init` gets `-input=false
+  -no-color` (plus `-upgrade` for `I`), `plan` gets `-input=false -no-color
+  -detailed-exitcode -out=<planfile>`, `apply` gets `-input=false
+  <planfile>`. Each template must therefore end with the terraform subcommand
+  it names. A verb with no template runs `"$TFMUX_TF_BIN" <verb>` plus those
+  flags. Don't put `-var` or `-var-file` in `apply`: it applies the saved plan
+  file, which already carries them.
+- For such a module the workspace is a **logical name**: `TF_WORKSPACE` is
+  never set, and `o` runs a plain `terraform output`.
+- If `init` references `$TFMUX_WORKSPACE`, the module directory can be
+  initialised for only one workspace at a time. tfmux remembers which one
+  (`init.workspace` in the module's state dir) and re-runs `init` before a
+  plan, output or apply for a different workspace — an apply does so inside
+  its tmux window, before `terraform apply`.
 
 ## Development
 

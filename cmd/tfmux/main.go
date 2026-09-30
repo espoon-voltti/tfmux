@@ -168,10 +168,17 @@ func short(oid string) string {
 }
 
 type lsModule struct {
-	Path               string   `json:"path"`
-	RelPath            string   `json:"rel_path"`
-	ManifestListed     bool     `json:"manifest_listed,omitempty"`
-	ManifestWorkspaces []string `json:"manifest_workspaces,omitempty"`
+	Path               string      `json:"path"`
+	RelPath            string      `json:"rel_path"`
+	ManifestListed     bool        `json:"manifest_listed,omitempty"`
+	ManifestWorkspaces []string    `json:"manifest_workspaces,omitempty"`
+	Commands           *lsCommands `json:"commands,omitempty"`
+}
+
+type lsCommands struct {
+	Init  string `json:"init,omitempty"`
+	Plan  string `json:"plan,omitempty"`
+	Apply string `json:"apply,omitempty"`
 }
 
 type lsRepo struct {
@@ -205,10 +212,14 @@ func printJSON(repos []*domain.Repo) error {
 			lr.GitError = r.Git.Err.Error()
 		}
 		for _, m := range r.Modules {
-			lr.Modules = append(lr.Modules, lsModule{
+			lm := lsModule{
 				Path: m.Path, RelPath: m.RelPath,
 				ManifestListed: m.ManifestListed, ManifestWorkspaces: m.ManifestWorkspaces,
-			})
+			}
+			if m.Templates != nil {
+				lm.Commands = &lsCommands{Init: m.Templates.Init, Plan: m.Templates.Plan, Apply: m.Templates.Apply}
+			}
+			lr.Modules = append(lr.Modules, lm)
 		}
 		out = append(out, lr)
 	}

@@ -7,9 +7,12 @@ package tmuxctl
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/espoon-voltti/tfmux/internal/tftest"
 )
 
 type call struct{ args []string }
@@ -218,5 +221,114 @@ func TestShellQuoting(t *testing.T) {
 	want := `'it'\''s a "test" $HOME'`
 	if got != want {
 		t.Errorf("shq = %s, want %s", got, want)
+	}
+}
+
+func TestApplyScriptTemplateMode(t *testing.T) {
+	script := applyScript(ApplySpec{
+		ModuleDir:      "/work/repo/app",
+		Workspace:      "prod",
+		TFBin:          "/opt/terraform",
+		PlanFile:       "/state/plan.tfplan",
+		ExitFile:       "/state/apply.exit",
+		ApplyCommand:   `"$TFMUX_TF_BIN" apply -input=false '/state/plan.tfplan'`,
+		InitCommand:    `"$TFMUX_TF_BIN" init -backend-config=$TFMUX_WORKSPACE.hcl -input=false -no-color`,
+		InitMarkerFile: "/state/init.workspace",
+	})
+	for _, frag := range []string{
+		"cd '/work/repo/app'",
+		"unset TF_WORKSPACE ",
+		"export TFMUX_WORKSPACE='prod' TFMUX_TF_BIN='/opt/terraform'",
+		`"$TFMUX_TF_BIN" init -backend-config=$TFMUX_WORKSPACE.hcl -input=false -no-color`,
+		"printf '%s' 'prod' > '/state/init.workspace.tmp' && mv '/state/init.workspace.tmp' '/state/init.workspace'",
+		`"$TFMUX_TF_BIN" apply -input=false '/state/plan.tfplan'`,
+		"'/state/apply.exit.tmp'",
+		"init FAILED",
+		"apply FAILED",
+	} {
+		if !strings.Contains(script, frag) {
+			t.Errorf("script missing %q:\n%s", frag, script)
+		}
+	}
+	if strings.Contains(script, "TF_WORKSPACE='prod'") {
+		t.Errorf("template-mode script sets TF_WORKSPACE:\n%s", script)
+	}
+	initIdx, applyIdx := strings.Index(script, "init -backend-config"), strings.Index(script, "apply -input=false")
+	if initIdx > applyIdx {
+		t.Error("init must run before apply")
+	}
+
+	noInit := applyScript(ApplySpec{Workspace: "prod", ApplyCommand: "x apply"})
+	if strings.Contains(noInit, "init FAILED") || strings.Contains(noInit, "init.workspace") {
+		t.Errorf("script without InitCommand still mentions init:\n%s", noInit)
+	}
+}
+
+// Runs the template-mode wrapper for real (sh + the fake terraform) and
+// checks its side effects: exit file, init marker, init-before-apply order,
+// and that a failed init skips the apply and leaves no marker.
+func TestApplyScriptTemplateExecutes(t *testing.T) {
+	for _, initFails := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ok", true: "init fails"}[initFails], func(t *testing.T) {
+			bin := tftest.Write(t, t.TempDir())
+			logFile := filepath.Join(t.TempDir(), "calls.log")
+			stateDir := t.TempDir()
+			exitFile := filepath.Join(stateDir, "apply.exit")
+			marker := filepath.Join(stateDir, "init.workspace")
+			script := applyScript(ApplySpec{
+				ModuleDir:      t.TempDir(),
+				Workspace:      "prod",
+				TFBin:          bin,
+				PlanFile:       "/state/plan.tfplan",
+				ExitFile:       exitFile,
+				ApplyCommand:   `"$TFMUX_TF_BIN" apply -input=false '/state/plan.tfplan'`,
+				InitCommand:    `"$TFMUX_TF_BIN" init -backend-config=$TFMUX_WORKSPACE.hcl -input=false -no-color`,
+				InitMarkerFile: marker,
+			})
+			cmd := exec.Command("/bin/sh", "-c", script)
+			cmd.Env = append(os.Environ(), "TFMUX_FAKE_LOG="+logFile, "TF_WORKSPACE=leaked")
+			if initFails {
+				cmd.Env = append(cmd.Env, "TFMUX_FAKE_INIT_STDERR=no backend")
+			}
+			cmd.Stdin, _ = os.Open(os.DevNull)
+			_ = cmd.Run()
+
+			exit, err := os.ReadFile(exitFile)
+			if err != nil {
+				t.Fatalf("exit file: %v", err)
+			}
+			data, _ := os.ReadFile(logFile)
+			var subs []string
+			for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+				if f := strings.Fields(line); len(f) > 4 && f[0] == "start" {
+					subs = append(subs, f[4])
+					if f[3] != "<none>" {
+						t.Errorf("TF_WORKSPACE reached terraform: %q", line)
+					}
+				}
+			}
+			got, _ := os.ReadFile(marker)
+			if initFails {
+				if string(exit) == "0" {
+					t.Error("exit file reports success after a failed init")
+				}
+				if strings.Join(subs, ",") != "init" {
+					t.Errorf("calls = %v, want init only", subs)
+				}
+				if len(got) != 0 {
+					t.Errorf("marker written after failed init: %q", got)
+				}
+				return
+			}
+			if string(exit) != "0" {
+				t.Errorf("exit file = %q", exit)
+			}
+			if strings.Join(subs, ",") != "init,apply" {
+				t.Errorf("calls = %v, want init then apply", subs)
+			}
+			if string(got) != "prod" {
+				t.Errorf("marker = %q, want prod", got)
+			}
+		})
 	}
 }

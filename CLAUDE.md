@@ -72,14 +72,18 @@ These are deliberate (see README "How it works"); changing them has real
 consequences:
 
 - Plans use **`TF_WORKSPACE`, never `terraform workspace select`** — selecting
-  mutates `.terraform/environment` shared with the user's shell.
+  mutates `.terraform/environment` shared with the user's shell. Modules with
+  manifest command templates are the one exception: they get
+  `TFMUX_WORKSPACE`, never `TF_WORKSPACE` (the workspace is a logical name).
 - **Per-module serialization:** two tasks never run in the same module dir at
   once (any command can lazily `init` and mutate `.terraform/`). In-process
   it's the runner's `busyModule` check; across concurrent tfmux instances it's
   an `flock` on the module's state-dir `lock` file, held for each task's
   duration (`internal/runner/lock_unix.go`).
 - **`init` is lazy and never `-upgrade`** implicitly (that rewrites the lock
-  file). All commands run `-input=false`.
+  file). All commands run `-input=false`. For an init template that depends
+  on the workspace, `init.workspace` in the module's state dir records which
+  workspace the dir is initialised for; plan/output/apply re-init on mismatch.
 - **Plan files contain secrets:** stored under the XDG state dir with 0700/0600
   perms, deleted after a successful apply, on discard, and after `plan_ttl`.
 - **Version guard:** plan files aren't portable across terraform/tofu versions;

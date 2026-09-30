@@ -13,6 +13,8 @@
 //	    ├── module.json              back-reference for debugging/GC
 //	    ├── lock                     flock'd to serialize work across instances
 //	    ├── workspaces.json          cached workspace enumeration
+//	    ├── init.workspace           workspace the module dir is initialised for,
+//	    │                            for modules whose init depends on it
 //	    └── ws/<workspaceName>/
 //	        ├── run.json             RunRecord
 //	        ├── plan.tfplan          0600 — plan files embed secrets
@@ -257,6 +259,50 @@ func (s *Store) LoadWorkspaces(modulePath string) (*WorkspaceCache, bool) {
 		return nil, false
 	}
 	return &c, true
+}
+
+// InitWorkspacePath returns the path of the module's init.workspace marker,
+// creating the module dir. The marker holds the bare workspace name.
+func (s *Store) InitWorkspacePath(modulePath string) (string, error) {
+	dir, err := s.ModuleDir(modulePath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "init.workspace"), nil
+}
+
+// LoadInitWorkspace returns the workspace the module dir was last initialised
+// for, or false when that is unknown.
+func (s *Store) LoadInitWorkspace(modulePath string) (string, bool) {
+	data, err := os.ReadFile(filepath.Join(s.Dir, "modules", moduleHash(modulePath), "init.workspace"))
+	if err != nil || len(data) == 0 {
+		return "", false
+	}
+	return string(data), true
+}
+
+// SaveInitWorkspace records the workspace the module dir is now initialised
+// for (0600, atomic).
+func (s *Store) SaveInitWorkspace(modulePath, workspace string) error {
+	path, err := s.InitWorkspacePath(modulePath)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(workspace), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// ClearInitWorkspace forgets which workspace the module dir is initialised
+// for. A missing marker is not an error.
+func (s *Store) ClearInitWorkspace(modulePath string) error {
+	err := os.Remove(filepath.Join(s.Dir, "modules", moduleHash(modulePath), "init.workspace"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // HasPlanFile reports whether a saved (non-expired, non-discarded) plan file

@@ -7,7 +7,13 @@
 // Invariants enforced here:
 //   - workspaces are selected via the TF_WORKSPACE env var, never
 //     `terraform workspace select` (which would mutate .terraform/environment
-//     shared with the user's shell and other tfmux jobs)
+//     shared with the user's shell and other tfmux jobs). A module with
+//     manifest command templates (TF.Templates) is the one exception: its
+//     workspace is a logical name exported as TFMUX_WORKSPACE, and
+//     TF_WORKSPACE is never set for it
+//   - templates run under /bin/sh with tfmux's own flags appended after the
+//     snippet (see InitCommand, PlanCommand, ApplyCommand), so every template
+//     must end with the terraform subcommand it names
 //   - session-dependent Terraform env vars (TF_WORKSPACE and friends, see
 //     sessionEnvVars) are stripped from the inherited environment before
 //     each command runs, so a value left over in the invoking shell can't
@@ -34,10 +40,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	tfjson "github.com/hashicorp/terraform-json"
+
+	"github.com/espoon-voltti/tfmux/internal/domain"
 )
 
 // TF runs terraform commands in one module directory.
@@ -45,6 +52,11 @@ type TF struct {
 	Bin string   // terraform binary (name on PATH or absolute)
 	Dir string   // module directory (cmd.Dir, so tfenv shims resolve locally)
 	Env []string // extra env entries appended to os.Environ()
+
+	// Templates, when set, replaces the init/plan/apply command lines with
+	// the module's manifest templates (see the package doc). nil keeps the
+	// default commands.
+	Templates *domain.CommandTemplates
 
 	// Out, when set, receives the command's combined output as it is produced
 	// (in addition to the buffered Result.Output), so callers can stream a
@@ -63,12 +75,32 @@ type Result struct {
 // exits are reported via Result.ExitCode.
 func (t TF) run(ctx context.Context, workspace string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, t.Bin, args...)
-	cmd.Dir = t.Dir
-	cmd.Env = append(filteredEnviron(), "TF_IN_AUTOMATION=1")
-	cmd.Env = append(cmd.Env, t.Env...)
+	cmd.Env = t.baseEnv()
 	if workspace != "" {
 		cmd.Env = append(cmd.Env, "TF_WORKSPACE="+workspace)
 	}
+	return t.runCmd(ctx, cmd, t.Bin+" "+strings.Join(args, " "))
+}
+
+// runTemplate executes a manifest command template under /bin/sh with the
+// workspace exported as TFMUX_WORKSPACE. The shell gets its own process
+// group so cancellation reaches terraform, not just sh.
+func (t TF) runTemplate(ctx context.Context, workspace, script string) (Result, error) {
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
+	cmd.Env = append(t.baseEnv(), "TFMUX_TF_BIN="+t.Bin, "TFMUX_WORKSPACE="+workspace)
+	ownProcessGroup(cmd)
+	return t.runCmd(ctx, cmd, "sh -c "+script)
+}
+
+func (t TF) baseEnv() []string {
+	env := append(filteredEnviron(), "TF_IN_AUTOMATION=1")
+	return append(env, t.Env...)
+}
+
+// runCmd runs a prepared command in the module dir, teeing output to Out.
+// desc names the command in the error for a failure to run at all.
+func (t TF) runCmd(ctx context.Context, cmd *exec.Cmd, desc string) (Result, error) {
+	cmd.Dir = t.Dir
 	var buf bytes.Buffer
 	var sink io.Writer = &buf
 	if t.Out != nil {
@@ -76,9 +108,7 @@ func (t TF) run(ctx context.Context, workspace string, args ...string) (Result, 
 	}
 	cmd.Stdout = sink
 	cmd.Stderr = sink
-	cmd.Cancel = func() error {
-		return cmd.Process.Signal(syscall.SIGINT)
-	}
+	cmd.Cancel = func() error { return interrupt(cmd) }
 	cmd.WaitDelay = 15 * time.Second // SIGKILL if SIGINT didn't work
 
 	err := cmd.Run()
@@ -94,7 +124,45 @@ func (t TF) run(ctx context.Context, workspace string, args ...string) (Result, 
 		res.ExitCode = ee.ExitCode()
 		return res, nil
 	}
-	return res, fmt.Errorf("%s %s in %s: %w", t.Bin, strings.Join(args, " "), t.Dir, err)
+	return res, fmt.Errorf("%s in %s: %w", desc, t.Dir, err)
+}
+
+// ShellQuote single-quotes s for /bin/sh.
+func ShellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// DefaultTemplate is the command a template module runs for a verb it has
+// no template for.
+func DefaultTemplate(verb string) string { return `"$TFMUX_TF_BIN" ` + verb }
+
+// TemplateOr returns tmpl, or the default template for verb when tmpl is
+// blank.
+func TemplateOr(tmpl, verb string) string {
+	if tmpl == "" {
+		return DefaultTemplate(verb)
+	}
+	return tmpl
+}
+
+// InitCommand is the full shell line for an init template.
+func InitCommand(tmpl string, upgrade bool) string {
+	s := tmpl + " -input=false -no-color"
+	if upgrade {
+		s += " -upgrade"
+	}
+	return s
+}
+
+// PlanCommand is the full shell line for a plan template writing outFile.
+func PlanCommand(tmpl, outFile string) string {
+	return tmpl + " -input=false -no-color -detailed-exitcode -out=" + ShellQuote(outFile)
+}
+
+// ApplyCommand is the full shell line for an apply template applying
+// planFile.
+func ApplyCommand(tmpl, planFile string) string {
+	return tmpl + " -input=false " + ShellQuote(planFile)
 }
 
 // sessionEnvVars are Terraform env vars that carry state from the invoking
@@ -162,8 +230,13 @@ func (t TF) Initialized() bool {
 }
 
 // Init runs terraform init. upgrade additionally passes -upgrade, which
-// mutates .terraform.lock.hcl — never set it automatically.
-func (t TF) Init(ctx context.Context, upgrade bool) (Result, error) {
+// mutates .terraform.lock.hcl — never set it automatically. workspace is
+// only meaningful with Templates, where the init template may depend on it;
+// the default init ignores it.
+func (t TF) Init(ctx context.Context, workspace string, upgrade bool) (Result, error) {
+	if t.Templates != nil {
+		return t.runTemplate(ctx, workspace, InitCommand(TemplateOr(t.Templates.Init, "init"), upgrade))
+	}
 	args := []string{"init", "-input=false", "-no-color"}
 	if upgrade {
 		args = append(args, "-upgrade")
@@ -241,21 +314,23 @@ func ClassifyPlanError(output []byte) PlanErrorKind {
 // responsible for initializing the module first and for retrying after an
 // init-shaped failure (see Initialized/NeedsInit).
 func (t TF) Plan(ctx context.Context, workspace, outFile string) (Result, error) {
+	if t.Templates != nil {
+		return t.runTemplate(ctx, workspace, PlanCommand(TemplateOr(t.Templates.Plan, "plan"), outFile))
+	}
 	return t.run(ctx, workspace,
 		"plan", "-input=false", "-no-color", "-detailed-exitcode", "-out="+outFile)
 }
 
 // Output runs `terraform output` for one workspace, returning its plain-text
 // listing. Callers are responsible for initializing the module first and for
-// retrying after an init-shaped failure (see Initialized/NeedsInit).
+// retrying after an init-shaped failure (see Initialized/NeedsInit). A
+// template module has no output template; its output runs the binary plainly
+// because the workspace is a logical name, not a terraform workspace.
 func (t TF) Output(ctx context.Context, workspace string) (Result, error) {
+	if t.Templates != nil {
+		workspace = ""
+	}
 	return t.run(ctx, workspace, "output", "-no-color")
-}
-
-// Apply applies a saved plan file. Used only for constructing the tmux
-// command line; tfmux itself never runs apply headless.
-func (t TF) ApplyArgs(planFile string) []string {
-	return []string{"apply", "-input=false", planFile}
 }
 
 // ShowPlan decodes a saved plan file via `terraform show -json`.

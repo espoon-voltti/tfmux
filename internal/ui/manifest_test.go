@@ -123,3 +123,40 @@ func TestInitDoneSkipsEnumerateForManifestListed(t *testing.T) {
 		t.Errorf("enumerate tasks = %d, want 0", n)
 	}
 }
+
+func TestManifestReloadUpdatesTemplates(t *testing.T) {
+	m, mod := fixtureModel(t)
+	root := t.TempDir()
+	repo := mod.Repo
+	repo.Path = root
+	mod.RelPath = "base"
+	mod.Path = filepath.Join(root, "base")
+	repo.ManifestPath = filepath.Join(root, manifest.FileName)
+	mod.ManifestListed = true
+	mod.ManifestWorkspaces = []string{"prod"}
+	mod.Templates = &domain.CommandTemplates{Init: "stale"}
+	if err := os.WriteFile(filepath.Join(root, manifest.FileName),
+		[]byte(`[{"root_module": "base", "workspaces": ["prod"], "plan": "terraform plan -var-file=$TFMUX_WORKSPACE.tfvars"}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m.cursor = 1
+	cmd := keyPress(m, "w")
+	if cmd == nil {
+		t.Fatal("expected a cmd from 'w' on a manifest-listed module")
+	}
+	m.Update(cmd())
+
+	if mod.Templates == nil || mod.Templates.Init != "" || !strings.Contains(mod.Templates.Plan, "-var-file") {
+		t.Errorf("Templates after reload = %+v", mod.Templates)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, manifest.FileName),
+		[]byte(`[{"root_module": "base", "workspaces": ["prod"]}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.Update(keyPress(m, "w")())
+	if mod.Templates != nil {
+		t.Errorf("Templates after removing them from the manifest = %+v, want nil", mod.Templates)
+	}
+}

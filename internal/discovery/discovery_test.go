@@ -275,3 +275,34 @@ func TestScanRepoManifestErrDoesNotBreakDiscovery(t *testing.T) {
 		t.Error("normal module discovery should still work")
 	}
 }
+
+func TestScanRepoManifestTemplatesAnnotated(t *testing.T) {
+	root := t.TempDir()
+	repo := mkdir(t, root, "repo1")
+	mkdir(t, repo, ".git")
+	base := mkdir(t, repo, "base")
+	write(t, base, "main.tf", backendModule)
+	shared := mkdir(t, repo, "shared")
+	write(t, shared, "main.tf", backendModule)
+	writeManifest(t, repo, `[
+	  {"root_module": "base", "workspaces": ["staging", "prod"],
+	   "init": "terraform init -backend-config=$TFMUX_WORKSPACE.hcl"},
+	  {"root_module": "shared", "workspaces": ["default"]}
+	]`)
+
+	repos, err := Discover([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseMod := findModule(repos[0], "base")
+	if !baseMod.Templated() || !baseMod.WorkspaceDependentInit() {
+		t.Errorf("base: Templates = %+v", baseMod.Templates)
+	}
+	if baseMod.Templates.Plan != "" {
+		t.Errorf("base: Plan template = %q, want empty", baseMod.Templates.Plan)
+	}
+	sharedMod := findModule(repos[0], "shared")
+	if sharedMod.Templated() {
+		t.Errorf("shared: Templates = %+v, want nil", sharedMod.Templates)
+	}
+}

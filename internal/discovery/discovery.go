@@ -134,6 +134,7 @@ func applyManifest(repo *domain.Repo) {
 		if mod, ok := byRelPath[entry.RootModule]; ok {
 			mod.ManifestListed = true
 			mod.ManifestWorkspaces = entry.Workspaces
+			mod.Templates = TemplatesFor(entry)
 			continue
 		}
 		dir := filepath.Join(repo.Path, filepath.FromSlash(entry.RootModule))
@@ -144,11 +145,21 @@ func applyManifest(repo *domain.Repo) {
 				RelPath:            filepath.FromSlash(entry.RootModule),
 				ManifestListed:     true,
 				ManifestWorkspaces: entry.Workspaces,
+				Templates:          TemplatesFor(entry),
 			})
 			continue
 		}
 		repo.ManifestMissing = append(repo.ManifestMissing, entry.RootModule)
 	}
+}
+
+// TemplatesFor returns the entry's command templates, or nil when it has
+// none.
+func TemplatesFor(entry manifest.Entry) *domain.CommandTemplates {
+	if entry.Init == "" && entry.Plan == "" && entry.Apply == "" {
+		return nil
+	}
+	return &domain.CommandTemplates{Init: entry.Init, Plan: entry.Plan, Apply: entry.Apply}
 }
 
 // IsRootModule reports whether dir's *.tf files mark it as a Terraform root

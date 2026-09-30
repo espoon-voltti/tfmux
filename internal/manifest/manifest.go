@@ -7,6 +7,8 @@
 // module tfmux should manage and the workspaces valid for it. Where a repo
 // has one, it is authoritative: listed modules get their workspaces from the
 // manifest rather than the backend, and modules absent from it are hidden.
+// An entry may also carry shell command templates for init, plan and apply;
+// see Entry.
 //
 // This is unrelated to tfmux's own per-module workspace enumeration cache
 // (also named "workspaces.json", under the XDG state dir — see
@@ -31,6 +33,14 @@ type Entry struct {
 	Comment    string   `json:"_comment,omitempty"`
 	RootModule string   `json:"root_module"` // repo-root-relative, slash-separated
 	Workspaces []string `json:"workspaces"`
+
+	// Init, Plan and Apply are optional /bin/sh snippets that replace the
+	// default terraform command for that verb. tfmux appends its own flags
+	// (and the plan file) after the snippet and exports TFMUX_WORKSPACE and
+	// TFMUX_TF_BIN to it. Blank means the default command.
+	Init  string `json:"init,omitempty"`
+	Plan  string `json:"plan,omitempty"`
+	Apply string `json:"apply,omitempty"`
 }
 
 // Manifest is a repo's parsed, validated workspace manifest.
@@ -81,6 +91,7 @@ func Load(repoPath string) (*Manifest, error) {
 				return nil, fmt.Errorf("%s: root_module %q: workspace name must not be empty", FileName, e.RootModule)
 			}
 		}
+		e.Init, e.Plan, e.Apply = strings.TrimSpace(e.Init), strings.TrimSpace(e.Plan), strings.TrimSpace(e.Apply)
 		byModule[e.RootModule] = e.Workspaces
 	}
 	return &Manifest{Path: p, Entries: entries, byModule: byModule}, nil

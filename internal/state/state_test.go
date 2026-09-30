@@ -136,3 +136,32 @@ func TestIgnoreRoundTrip(t *testing.T) {
 		t.Errorf("ignore = %v", got)
 	}
 }
+
+func TestInitWorkspaceRoundTrip(t *testing.T) {
+	s := New(t.TempDir())
+	if ws, ok := s.LoadInitWorkspace("/m"); ok {
+		t.Fatalf("absent marker loaded as %q", ws)
+	}
+	if err := s.ClearInitWorkspace("/m"); err != nil {
+		t.Fatalf("clearing an absent marker: %v", err)
+	}
+	if err := s.SaveInitWorkspace("/m", "prod"); err != nil {
+		t.Fatal(err)
+	}
+	if ws, ok := s.LoadInitWorkspace("/m"); !ok || ws != "prod" {
+		t.Errorf("LoadInitWorkspace = %q, %v", ws, ok)
+	}
+	path, _ := s.InitWorkspacePath("/m")
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
+		t.Errorf("init.workspace mode = %v", info.Mode().Perm())
+	}
+	if err := s.ClearInitWorkspace("/m"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.LoadInitWorkspace("/m"); ok {
+		t.Error("marker survived Clear")
+	}
+	if err := s.ClearInitWorkspace("/m"); err != nil {
+		t.Errorf("second Clear: %v", err)
+	}
+}

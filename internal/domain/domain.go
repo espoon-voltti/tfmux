@@ -7,6 +7,8 @@
 // layer can import it.
 package domain
 
+import "strings"
+
 // GitStatus is a snapshot of a repo's working tree, from
 // `git status --porcelain=v2 --branch`.
 type GitStatus struct {
@@ -60,8 +62,9 @@ type Module struct {
 
 	InitErr string // output of the last terraform init, when it failed
 
-	ManifestListed     bool     // true when the repo manifest lists this module
-	ManifestWorkspaces []string // this module's workspaces per the manifest, when ManifestListed
+	ManifestListed     bool              // true when the repo manifest lists this module
+	ManifestWorkspaces []string          // this module's workspaces per the manifest, when ManifestListed
+	Templates          *CommandTemplates // from the repo manifest; nil means the default terraform commands
 }
 
 // ManifestHidden reports whether the module should be hidden from the normal
@@ -69,6 +72,31 @@ type Module struct {
 // it. A repo with no manifest hides nothing this way.
 func (m *Module) ManifestHidden() bool {
 	return m.Repo.HasManifest() && !m.ManifestListed
+}
+
+// Templated reports whether the module's commands come from manifest
+// templates. For such a module a workspace is a logical name handed to the
+// templates as TFMUX_WORKSPACE, not a terraform workspace.
+func (m *Module) Templated() bool { return m.Templates != nil }
+
+// WorkspaceDependentInit reports whether the module directory can be
+// initialised for only one workspace at a time.
+func (m *Module) WorkspaceDependentInit() bool { return m.Templates.InitUsesWorkspace() }
+
+// CommandTemplates are a manifest entry's optional shell snippets for init,
+// plan and apply. An empty field means the default command for that verb.
+type CommandTemplates struct {
+	Init  string
+	Plan  string
+	Apply string
+}
+
+// InitUsesWorkspace reports whether the init template expands
+// TFMUX_WORKSPACE, so that running it for one workspace invalidates the
+// module directory for every other. Nil-safe.
+func (c *CommandTemplates) InitUsesWorkspace() bool {
+	return c != nil && (strings.Contains(c.Init, "$TFMUX_WORKSPACE") ||
+		strings.Contains(c.Init, "${TFMUX_WORKSPACE"))
 }
 
 // Workspace is one Terraform workspace of a root module.
