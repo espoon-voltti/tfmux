@@ -176,9 +176,10 @@ type lsModule struct {
 }
 
 type lsCommands struct {
-	Init  string `json:"init,omitempty"`
-	Plan  string `json:"plan,omitempty"`
-	Apply string `json:"apply,omitempty"`
+	Init   string `json:"init,omitempty"`
+	Plan   string `json:"plan,omitempty"`
+	Apply  string `json:"apply,omitempty"`
+	Output string `json:"output,omitempty"`
 }
 
 type lsRepo struct {
@@ -217,7 +218,10 @@ func printJSON(repos []*domain.Repo) error {
 				ManifestListed: m.ManifestListed, ManifestWorkspaces: m.ManifestWorkspaces,
 			}
 			if m.Templates != nil {
-				lm.Commands = &lsCommands{Init: m.Templates.Init, Plan: m.Templates.Plan, Apply: m.Templates.Apply}
+				lm.Commands = &lsCommands{
+					Init: m.Templates.Init, Plan: m.Templates.Plan,
+					Apply: m.Templates.Apply, Output: m.Templates.Output,
+				}
 			}
 			lr.Modules = append(lr.Modules, lm)
 		}

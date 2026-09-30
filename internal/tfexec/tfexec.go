@@ -165,6 +165,9 @@ func ApplyCommand(tmpl, planFile string) string {
 	return tmpl + " -input=false " + ShellQuote(planFile)
 }
 
+// OutputCommand is the full shell line for an output template.
+func OutputCommand(tmpl string) string { return tmpl + " -no-color" }
+
 // sessionEnvVars are Terraform env vars that carry state from the invoking
 // shell session rather than a deliberate tfmux or user choice. tfmux decides
 // each of these itself for every command it runs (workspace via the
@@ -323,12 +326,10 @@ func (t TF) Plan(ctx context.Context, workspace, outFile string) (Result, error)
 
 // Output runs `terraform output` for one workspace, returning its plain-text
 // listing. Callers are responsible for initializing the module first and for
-// retrying after an init-shaped failure (see Initialized/NeedsInit). A
-// template module has no output template; its output runs the binary plainly
-// because the workspace is a logical name, not a terraform workspace.
+// retrying after an init-shaped failure (see Initialized/NeedsInit).
 func (t TF) Output(ctx context.Context, workspace string) (Result, error) {
 	if t.Templates != nil {
-		workspace = ""
+		return t.runTemplate(ctx, workspace, OutputCommand(TemplateOr(t.Templates.Output, "output")))
 	}
 	return t.run(ctx, workspace, "output", "-no-color")
 }

@@ -84,11 +84,13 @@ func (m *Module) Templated() bool { return m.Templates != nil }
 func (m *Module) WorkspaceDependentInit() bool { return m.Templates.InitUsesWorkspace() }
 
 // CommandTemplates are a manifest entry's optional shell snippets for init,
-// plan and apply. An empty field means the default command for that verb.
+// plan, apply and output. An empty field means the default command for that
+// verb.
 type CommandTemplates struct {
-	Init  string
-	Plan  string
-	Apply string
+	Init   string
+	Plan   string
+	Apply  string
+	Output string
 }
 
 // InitUsesWorkspace reports whether the init template expands

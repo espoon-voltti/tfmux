@@ -179,8 +179,8 @@ happens to share the filename `workspaces.json` under the XDG state dir):
 
 Not every repo selects an environment with a terraform workspace. When each
 environment is instead a separate backend picked with `-backend-config`, a
-`-var-file`, an `AWS_PROFILE` or the like, an entry can give `init`, `plan`
-and/or `apply` as shell snippets:
+`-var-file`, an `AWS_PROFILE` or the like, an entry can give `init`, `plan`,
+`apply` and/or `output` as shell snippets:
 
 ```json
 [
@@ -200,15 +200,15 @@ and/or `apply` as shell snippets:
 - tfmux **appends its own flags** after the snippet: `init` gets `-input=false
   -no-color` (plus `-upgrade` for `I`), `plan` gets `-input=false -no-color
   -detailed-exitcode -out=<planfile>`, `apply` gets `-input=false
-  <planfile>`. Each template must therefore end with the terraform subcommand
-  it names. A verb with no template runs `"$TFMUX_TF_BIN" <verb>` plus those
-  flags. Don't put `-var` or `-var-file` in `apply`: it applies the saved plan
-  file, which already carries them.
+  <planfile>`, `output` gets `-no-color`. Each template must therefore end
+  with the terraform subcommand it names. A verb with no template runs
+  `"$TFMUX_TF_BIN" <verb>` plus those flags. Don't put `-var` or `-var-file`
+  in `apply`: it applies the saved plan file, which already carries them.
 - For such a module the workspace is a **logical name**: `TFMUX_WORKSPACE`
-  does not carry over to `TF_WORKSPACE`, which tfmux never sets, and `o` runs
-  a plain `terraform output`. If the environment is also a real terraform
-  workspace, say so in the template:
-  `"plan": "TF_WORKSPACE=$TFMUX_WORKSPACE terraform plan -var-file=$TFMUX_WORKSPACE.tfvars"`.
+  does not carry over to `TF_WORKSPACE`, which tfmux never sets for any of
+  the four verbs. If the environment is also a real terraform workspace, say
+  so in every template that reads state, `output` included:
+  `"output": "TF_WORKSPACE=$TFMUX_WORKSPACE terraform output"`.
 - If `init` references `$TFMUX_WORKSPACE`, the module directory can be
   initialised for only one workspace at a time. tfmux remembers which one
   (`init.workspace` in the module's state dir) and re-runs `init` before a

@@ -287,7 +287,7 @@ func TestScanRepoManifestTemplatesAnnotated(t *testing.T) {
 	writeManifest(t, repo, `[
 	  {"root_module": "base", "workspaces": ["staging", "prod"],
 	   "init": "terraform init -backend-config=$TFMUX_WORKSPACE.hcl"},
-	  {"root_module": "shared", "workspaces": ["default"]}
+	  {"root_module": "shared", "workspaces": ["default"], "output": "  "}
 	]`)
 
 	repos, err := Discover([]string{root})

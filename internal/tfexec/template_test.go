@@ -22,6 +22,7 @@ func TestTemplateCommandStrings(t *testing.T) {
 		{InitCommand("terraform init", true), "terraform init -input=false -no-color -upgrade"},
 		{PlanCommand("terraform plan", odd), "terraform plan -input=false -no-color -detailed-exitcode -out=" + quoted},
 		{ApplyCommand("terraform apply", odd), "terraform apply -input=false " + quoted},
+		{OutputCommand("terraform output"), "terraform output -no-color"},
 		{TemplateOr("", "plan"), `"$TFMUX_TF_BIN" plan`},
 		{TemplateOr("custom plan", "plan"), "custom plan"},
 	}
@@ -109,6 +110,25 @@ func TestTemplateDefaultsForMissingVerbs(t *testing.T) {
 	}
 	if !strings.Contains(cs[0], " plan ") || !strings.Contains(cs[1], " output ") {
 		t.Errorf("calls = %v", cs)
+	}
+}
+
+// An output template can opt into the real terraform workspace itself; tfmux
+// only ever passes TFMUX_WORKSPACE.
+func TestOutputTemplateSetsOwnTFWorkspace(t *testing.T) {
+	tf, logFile := newTF(t)
+	tf.Templates = &domain.CommandTemplates{Output: `TF_WORKSPACE=$TFMUX_WORKSPACE "$TFMUX_TF_BIN" output`}
+	res, err := tf.Output(context.Background(), "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 0 || !strings.Contains(string(res.Output), "greeting") {
+		t.Fatalf("res = %d %q", res.ExitCode, res.Output)
+	}
+	cs := calls(t, logFile)
+	last := cs[len(cs)-1]
+	if !strings.Contains(last, " prod output -no-color") {
+		t.Errorf("call = %q, want the template's TF_WORKSPACE and the appended -no-color", last)
 	}
 }
 

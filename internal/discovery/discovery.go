@@ -156,10 +156,10 @@ func applyManifest(repo *domain.Repo) {
 // TemplatesFor returns the entry's command templates, or nil when it has
 // none.
 func TemplatesFor(entry manifest.Entry) *domain.CommandTemplates {
-	if entry.Init == "" && entry.Plan == "" && entry.Apply == "" {
+	if entry.Init == "" && entry.Plan == "" && entry.Apply == "" && entry.Output == "" {
 		return nil
 	}
-	return &domain.CommandTemplates{Init: entry.Init, Plan: entry.Plan, Apply: entry.Apply}
+	return &domain.CommandTemplates{Init: entry.Init, Plan: entry.Plan, Apply: entry.Apply, Output: entry.Output}
 }
 
 // IsRootModule reports whether dir's *.tf files mark it as a Terraform root

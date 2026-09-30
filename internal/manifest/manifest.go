@@ -34,13 +34,14 @@ type Entry struct {
 	RootModule string   `json:"root_module"` // repo-root-relative, slash-separated
 	Workspaces []string `json:"workspaces"`
 
-	// Init, Plan and Apply are optional /bin/sh snippets that replace the
-	// default terraform command for that verb. tfmux appends its own flags
-	// (and the plan file) after the snippet and exports TFMUX_WORKSPACE and
-	// TFMUX_TF_BIN to it. Blank means the default command.
-	Init  string `json:"init,omitempty"`
-	Plan  string `json:"plan,omitempty"`
-	Apply string `json:"apply,omitempty"`
+	// Init, Plan, Apply and Output are optional /bin/sh snippets that replace
+	// the default terraform command for that verb. tfmux appends its own
+	// flags (and the plan file) after the snippet and exports TFMUX_WORKSPACE
+	// and TFMUX_TF_BIN to it. Blank means the default command.
+	Init   string `json:"init,omitempty"`
+	Plan   string `json:"plan,omitempty"`
+	Apply  string `json:"apply,omitempty"`
+	Output string `json:"output,omitempty"`
 }
 
 // Manifest is a repo's parsed, validated workspace manifest.
@@ -91,7 +92,8 @@ func Load(repoPath string) (*Manifest, error) {
 				return nil, fmt.Errorf("%s: root_module %q: workspace name must not be empty", FileName, e.RootModule)
 			}
 		}
-		e.Init, e.Plan, e.Apply = strings.TrimSpace(e.Init), strings.TrimSpace(e.Plan), strings.TrimSpace(e.Apply)
+		e.Init, e.Plan = strings.TrimSpace(e.Init), strings.TrimSpace(e.Plan)
+		e.Apply, e.Output = strings.TrimSpace(e.Apply), strings.TrimSpace(e.Output)
 		byModule[e.RootModule] = e.Workspaces
 	}
 	return &Manifest{Path: p, Entries: entries, byModule: byModule}, nil

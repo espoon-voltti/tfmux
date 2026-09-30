@@ -79,7 +79,8 @@ func TestLoadTemplates(t *testing.T) {
 	  {"root_module": "terraform/app", "workspaces": ["prod"],
 	   "init": "  terraform init -backend-config=$TFMUX_WORKSPACE.hcl ",
 	   "plan": "terraform plan -var-file=$TFMUX_WORKSPACE.tfvars",
-	   "apply": "   "},
+	   "apply": "   ",
+	   "output": "terraform output"},
 	  {"root_module": "terraform/shared", "workspaces": ["default"]}
 	]`)
 	m, err := Load(dir)
@@ -96,8 +97,11 @@ func TestLoadTemplates(t *testing.T) {
 	if app.Apply != "" {
 		t.Errorf("blank Apply = %q, want empty", app.Apply)
 	}
+	if app.Output != "terraform output" {
+		t.Errorf("Output = %q", app.Output)
+	}
 	shared := m.Entries[1]
-	if shared.Init != "" || shared.Plan != "" || shared.Apply != "" {
+	if shared.Init != "" || shared.Plan != "" || shared.Apply != "" || shared.Output != "" {
 		t.Errorf("absent templates parsed as %+v", shared)
 	}
 }
