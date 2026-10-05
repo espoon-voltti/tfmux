@@ -313,3 +313,94 @@ func TestTaskPaneSortsRunningFirst(t *testing.T) {
 		t.Errorf("running apply should sort first: %+v", tasks)
 	}
 }
+
+func TestFinishedTaskStaysInPane(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	m.addTask(runner.KindPlan, key)
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseRunning})
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseFailed, Err: "boom"})
+
+	if m.hasTask(runner.KindPlan, key) {
+		t.Fatal("a finished task must not count as in flight")
+	}
+	keyPress(m, "T")
+	v := m.View()
+	if !strings.Contains(v, "Tasks (0 · 1 done)") {
+		t.Errorf("pane header should count the finished task: %q", v)
+	}
+	if !strings.Contains(v, "✗ failed") || !strings.Contains(v, "prod") {
+		t.Errorf("finished task not listed: %q", v)
+	}
+}
+
+// A queued task canceled before it ever ran has no log, so it isn't kept.
+func TestQueuedCancelNotKeptAsFinished(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	m.addTask(runner.KindPlan, key)
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseCanceled})
+
+	if len(m.recentlyDone()) != 0 {
+		t.Errorf("queued-then-canceled task should not be listed: %v", m.done)
+	}
+}
+
+// While a task is re-run, only its in-flight row is listed, not the previous
+// finished one.
+func TestRerunHidesPreviousFinishedRow(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	m.addTask(runner.KindPlan, key)
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseRunning})
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseDone})
+	m.addTask(runner.KindPlan, key)
+
+	if n := len(m.sortedTasks()); n != 1 {
+		t.Errorf("rows = %d, want 1 (the re-run only)", n)
+	}
+}
+
+func TestViewFinishedTaskLogReturnsToPane(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	m.addTask(runner.KindPlan, key)
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseRunning})
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseDone})
+
+	keyPress(m, "T")
+	cmd := keyPress(m, "enter")
+	if cmd == nil {
+		t.Fatal("enter on a finished task should load its log")
+	}
+	m.Update(logMsg{id: runner.TaskID(runner.KindPlan, key), content: "Plan: 1 to add"})
+	if m.focus != focusDetail {
+		t.Fatalf("focus = %v, want detail", m.focus)
+	}
+	if m.detailFollow != "" {
+		t.Error("a finished task's log must not be followed")
+	}
+	keyPress(m, "esc")
+	if m.focus != focusTasks {
+		t.Errorf("esc should return to the task pane, focus = %v", m.focus)
+	}
+}
+
+func TestCancelOnFinishedTaskIsNoop(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	m.addTask(runner.KindPlan, key)
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseRunning})
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseDone})
+
+	keyPress(m, "T")
+	keyPress(m, "x")
+	if len(m.recentlyDone()) != 1 {
+		t.Error("x on a finished task should leave it listed")
+	}
+}

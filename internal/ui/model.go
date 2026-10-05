@@ -46,6 +46,11 @@ type taskState struct {
 	running bool   // false: queued waiting for a slot; true: executing
 	token   string // apply: the tmux window's durable identity — see tmuxctl.WindowFor
 	started time.Time
+
+	// Set once the task has finished and moved to Model.done.
+	finished time.Time
+	outcome  string // short result label for the task pane, e.g. "✓ done"
+	failed   bool
 }
 
 type focusArea int
@@ -109,8 +114,12 @@ type Model struct {
 	showHelp     bool
 	confirmQuit  bool
 
-	taskCursorID string // TaskID of the selection in the task pane — not a bare index, see taskCursorIndex
-	confirmKill  string // task id awaiting kill confirmation (running apply)
+	// done holds tasks that finished during this session, by TaskID — only
+	// the latest run of each, since a re-run overwrites the task's log file.
+	done         map[string]*taskState
+	taskCursorID string    // TaskID of the selection in the task pane — not a bare index, see taskCursorIndex
+	detailReturn focusArea // where esc from the detail view goes back to
+	confirmKill  string    // task id awaiting kill confirmation (running apply)
 
 	// confirmApply holds the applyable workspaces awaiting confirmation for a
 	// mass apply over a repo/module row (confirmApplyLabel names the scope).
@@ -138,6 +147,7 @@ func NewModel(cfg *config.Config, store *state.Store) *Model {
 		runs:         map[string]*state.RunRecord{},
 		planFiles:    map[string]bool{},
 		tasks:        map[string]*taskState{},
+		done:         map[string]*taskState{},
 		fingerprints: map[string]string{},
 		collapsed:    map[string]bool{},
 		marked:       map[string]bool{},
@@ -488,8 +498,8 @@ func (m *Model) anyTask(kind runner.Kind) bool {
 }
 
 // updateRunnerEvent folds a task lifecycle transition into the model: running
-// flips the task's display state, terminal events remove it and apply the
-// kind-specific result.
+// flips the task's display state, terminal events move it to the done list and
+// apply the kind-specific result.
 func (m *Model) updateRunnerEvent(ev runner.Event) tea.Cmd {
 	id := ev.TaskID()
 	if ev.Phase == runner.PhaseRunning {
@@ -501,8 +511,37 @@ func (m *Model) updateRunnerEvent(ev runner.Event) tea.Cmd {
 		ts.running = true
 		return m.taskRunning(ev, ts)
 	}
+	if ts := m.tasks[id]; ts != nil && (ts.running || ev.Phase != runner.PhaseCanceled) {
+		outcome, failed := taskOutcome(ev)
+		m.markDone(ts, outcome, failed)
+	}
 	delete(m.tasks, id)
 	return m.taskTerminal(ev)
+}
+
+func (m *Model) markDone(ts *taskState, outcome string, failed bool) {
+	ts.running = false
+	ts.finished = time.Now()
+	ts.outcome = outcome
+	ts.failed = failed
+	m.done[runner.TaskID(ts.kind, ts.key)] = ts
+}
+
+// taskOutcome labels a terminal event for the task pane.
+func taskOutcome(ev runner.Event) (label string, failed bool) {
+	switch {
+	case ev.Phase == runner.PhaseCanceled:
+		return "canceled", false
+	case ev.Phase == runner.PhaseFailed:
+		return "✗ failed", true
+	case ev.Kind == runner.KindApply && ev.Aborted:
+		return "✗ aborted", true
+	case ev.Kind == runner.KindApply && ev.ApplyExit != nil && *ev.ApplyExit != 0:
+		return fmt.Sprintf("✗ exit %d", *ev.ApplyExit), true
+	case ev.Kind == runner.KindPlan && ev.Record != nil && ev.Record.PlanExitCode == tfexec.PlanError:
+		return "✗ failed", true
+	}
+	return "✓ done", false
 }
 
 func (m *Model) taskRunning(ev runner.Event, ts *taskState) tea.Cmd {
@@ -723,7 +762,7 @@ func (m *Model) openLog(kind runner.Kind, key string) tea.Cmd {
 // auto-scrolling to the bottom unless the user has scrolled up.
 func (m *Model) updateLog(msg logMsg) (tea.Model, tea.Cmd) {
 	following := m.detailFollow == msg.id
-	m.focus = focusDetail
+	m.enterDetail()
 
 	if msg.err != nil {
 		// A just-started task may not have written its log yet — keep waiting.
@@ -738,7 +777,7 @@ func (m *Model) updateLog(msg logMsg) (tea.Model, tea.Cmd) {
 			m.detailFollow = ""
 			return m, nil
 		}
-		m.focus = focusTree
+		m.focus = m.detailReturn
 		m.status = "no log: " + msg.err.Error()
 		return m, nil
 	}
@@ -824,7 +863,7 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.focus == focusDetail {
 		switch {
 		case key.Matches(msg, keys.Esc), key.Matches(msg, keys.Quit):
-			m.focus = focusTree
+			m.focus = m.detailReturn
 			m.detailKey = ""
 			m.detailFollow = ""
 			return m, nil
@@ -1353,6 +1392,9 @@ func (m *Model) forgetTasks(key string) {
 			if kind == runner.KindApply && ts.running {
 				continue
 			}
+			if ts.running {
+				m.markDone(ts, "canceled", false)
+			}
 			delete(m.tasks, runner.TaskID(kind, key))
 		}
 	}
@@ -1642,6 +1684,19 @@ func (m *Model) showModuleError(mod *domain.Module, content string) {
 	m.detailTitle = m.detailTitleFor(runner.KindEnumerate, mod.Path)
 	m.detail.SetContent(colorizePlanLog(content))
 	m.detail.GotoTop()
+	m.enterDetail()
+}
+
+// enterDetail focuses the detail view, remembering whether esc should return
+// to the task pane or the tree.
+func (m *Model) enterDetail() {
+	if m.focus == focusDetail {
+		return
+	}
+	m.detailReturn = focusTree
+	if m.focus == focusTasks {
+		m.detailReturn = focusTasks
+	}
 	m.focus = focusDetail
 }
 
@@ -1682,6 +1737,9 @@ func (m *Model) headerContext() string {
 	}
 	switch m.focus {
 	case focusTasks:
+		if n := len(m.recentlyDone()); n > 0 {
+			return fmt.Sprintf("Tasks (%d · %d done)", len(m.tasks), n)
+		}
 		return fmt.Sprintf("Tasks (%d)", len(m.tasks))
 	case focusDetail:
 		return m.detailTitle

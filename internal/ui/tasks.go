@@ -16,7 +16,12 @@ import (
 	"github.com/espoon-voltti/tfmux/internal/runner"
 )
 
-// sortedTasks lists in-flight tasks for the pane: running first, then by
+// sortedTasks lists the pane's rows: in-flight tasks, then recentlyDone.
+func (m *Model) sortedTasks() []*taskState {
+	return append(m.sortedInFlight(), m.recentlyDone()...)
+}
+
+// sortedInFlight orders in-flight tasks: running first, then by
 // scheduling priority, then oldest first, then by task id as a final,
 // deterministic tiebreaker. That last clause matters: m.tasks is a map, so
 // its iteration order is randomized per call — without a total order, two
@@ -24,7 +29,7 @@ import (
 // moments later to act on "the row under the cursor") could legally disagree
 // on the order of two tied tasks, making the highlighted row and the
 // acted-on task different rows within the same keypress.
-func (m *Model) sortedTasks() []*taskState {
+func (m *Model) sortedInFlight() []*taskState {
 	out := make([]*taskState, 0, len(m.tasks))
 	for _, ts := range m.tasks {
 		out = append(out, ts)
@@ -39,6 +44,26 @@ func (m *Model) sortedTasks() []*taskState {
 		}
 		if !a.started.Equal(b.started) {
 			return a.started.Before(b.started)
+		}
+		return runner.TaskID(a.kind, a.key) < runner.TaskID(b.kind, b.key)
+	})
+	return out
+}
+
+// recentlyDone lists finished tasks, newest first. A task re-run since it
+// finished is left out: it is listed as in flight, and its log now belongs to
+// the new run.
+func (m *Model) recentlyDone() []*taskState {
+	out := make([]*taskState, 0, len(m.done))
+	for id, ts := range m.done {
+		if m.tasks[id] == nil {
+			out = append(out, ts)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if !a.finished.Equal(b.finished) {
+			return a.finished.After(b.finished)
 		}
 		return runner.TaskID(a.kind, a.key) < runner.TaskID(b.kind, b.key)
 	})
@@ -113,7 +138,7 @@ func (m *Model) viewSelectedTask() tea.Cmd {
 	switch ts.kind {
 	case runner.KindPlan, runner.KindApply:
 		return m.viewOrAttach(ts.key)
-	case runner.KindEnumerate, runner.KindInit:
+	case runner.KindEnumerate, runner.KindInit, runner.KindOutput:
 		return m.openLog(ts.kind, ts.key)
 	}
 	return nil
@@ -128,6 +153,9 @@ func (m *Model) cancelSelectedTask() {
 		return
 	}
 	ts := tasks[i]
+	if !ts.finished.IsZero() {
+		return
+	}
 	if ts.kind == runner.KindApply && ts.running {
 		// killing a live apply terminates terraform mid-flight — confirm first
 		m.confirmKill = runner.TaskID(ts.kind, ts.key)
@@ -191,14 +219,15 @@ func (m *Model) taskLabel(ts *taskState) string {
 	return ts.key
 }
 
-// renderTaskPane is the full-screen list of in-flight tasks (toggled with T).
+// renderTaskPane is the full-screen list of in-flight and finished tasks
+// (toggled with T).
 func (m *Model) renderTaskPane(height int) string {
 	tasks := m.sortedTasks()
 	m.clampTaskCursor()
 
 	var b strings.Builder
 	if len(tasks) == 0 {
-		return styleDim.Render("  no active tasks")
+		return styleDim.Render("  no tasks yet")
 	}
 
 	cursor, _ := m.taskCursorIndex(tasks)
@@ -224,13 +253,28 @@ func (m *Model) renderTaskPane(height int) string {
 
 func (m *Model) renderTaskLine(ts *taskState, selected bool, width int) string {
 	var badge string
-	if ts.running {
+	switch {
+	case !ts.finished.IsZero():
+		label := fmt.Sprintf("%-9s", ts.outcome)
+		switch {
+		case ts.failed:
+			badge = styleError.Render(label)
+		case ts.outcome == "canceled":
+			badge = styleDim.Render(label)
+		default:
+			badge = styleGood.Render(label)
+		}
+	case ts.running:
 		badge = styleRunning.Render(m.spinner.View() + " running")
-	} else {
+	default:
 		badge = styleDim.Render("◌ queued ")
 	}
 	line := fmt.Sprintf("  %s  %s  %s", badge, styleModule.Render(fmt.Sprintf("%-9s", ts.kind.String())), m.taskLabel(ts))
-	line += "  " + styleDim.Render(humanDur(ts.started))
+	if ts.finished.IsZero() {
+		line += "  " + styleDim.Render(humanDur(ts.started))
+	} else {
+		line += "  " + styleDim.Render("finished "+humanDur(ts.finished)+" ago")
+	}
 	if ts.kind == runner.KindApply && ts.running {
 		line += styleDim.Render("  (enter: attach)")
 	}
