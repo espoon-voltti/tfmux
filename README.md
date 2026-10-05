@@ -78,7 +78,7 @@ Run `tfmux` for the TUI, or `tfmux ls [--json]` for a scriptable dump.
 | `I` | `terraform init -upgrade` for the module — or every module, on a repo row |
 | `r` / `R` | refresh statuses / re-discover repos |
 | `w` | re-enumerate workspaces under the cursor (refreshes the cache) |
-| `/` | filter |
+| `/` | filter — repo/module-row actions (`p`, `A`, `x`, `I`, `w`) then only target what the filter leaves visible |
 | `?` | help, `q` quit |
 
 ## How it works (and why)

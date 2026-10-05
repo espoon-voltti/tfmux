@@ -1171,14 +1171,15 @@ func (m *Model) pageUp() {
 	m.ensureVisible()
 }
 
-// modulesUnder returns the modules a row acts on: every (non-ignored) module
-// of a repo row, or the single module of a module/workspace row.
+// modulesUnder returns the modules a row acts on: every non-ignored module of
+// a repo row that passes the filter, or the single module of a module/workspace
+// row.
 func (m *Model) modulesUnder(r row) []*domain.Module {
 	switch r.kind {
 	case rowRepo:
 		var mods []*domain.Module
 		for _, mod := range r.repo.Modules {
-			if !m.moduleHidden(mod) {
+			if !m.moduleHidden(mod) && m.moduleInFilter(r.repo, mod) {
 				mods = append(mods, mod)
 			}
 		}
@@ -1292,22 +1293,34 @@ func (m *Model) workspacesByKeys(keys map[string]bool) []*domain.Workspace {
 	return out
 }
 
+// workspacesUnder returns the workspaces a row acts on: the row's own
+// workspace, or those under a module/repo row that pass the filter.
 func (m *Model) workspacesUnder(r row) []*domain.Workspace {
 	switch r.kind {
 	case rowWorkspace:
 		return []*domain.Workspace{r.ws}
 	case rowModule:
-		return r.mod.Workspaces
+		return m.filteredWorkspaces(r.repo, r.mod)
 	case rowRepo:
 		var out []*domain.Workspace
 		for _, mod := range r.repo.Modules {
 			if !m.moduleHidden(mod) {
-				out = append(out, mod.Workspaces...)
+				out = append(out, m.filteredWorkspaces(r.repo, mod)...)
 			}
 		}
 		return out
 	}
 	return nil
+}
+
+func (m *Model) filteredWorkspaces(repo *domain.Repo, mod *domain.Module) []*domain.Workspace {
+	var out []*domain.Workspace
+	for _, ws := range mod.Workspaces {
+		if m.workspaceInFilter(repo, mod, ws) {
+			out = append(out, ws)
+		}
+	}
+	return out
 }
 
 func (m *Model) cancelCurrent() {
@@ -1321,7 +1334,7 @@ func (m *Model) cancelCurrent() {
 		keys = append(keys, r.ws.Key())
 	case rowModule:
 		keys = append(keys, r.mod.Path) // enumeration / init, if any
-		for _, ws := range r.mod.Workspaces {
+		for _, ws := range m.workspacesUnder(r) {
 			keys = append(keys, ws.Key())
 		}
 	}
@@ -1524,15 +1537,20 @@ func (m *Model) confirmMassApply(r row) tea.Cmd {
 	return nil
 }
 
-// scopeLabel names a repo/module row for confirmation prompts.
+// scopeLabel names a repo/module row for confirmation prompts, noting an
+// active filter since it narrows what the row acts on.
 func (m *Model) scopeLabel(r row) string {
+	var label string
 	switch r.kind {
 	case rowRepo:
-		return r.repo.Name
+		label = r.repo.Name
 	case rowModule:
-		return r.repo.Name + " · " + r.mod.RelPath
+		label = r.repo.Name + " · " + r.mod.RelPath
 	}
-	return ""
+	if m.filterText != "" {
+		label += fmt.Sprintf(" matching %q", m.filterText)
+	}
+	return label
 }
 
 // enqueueApplies launches confirmed applies, re-checking eligibility (state may

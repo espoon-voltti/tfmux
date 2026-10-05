@@ -90,7 +90,7 @@ func (m *Model) flatten() []row {
 				if m.ignore[ws.Key()] && !m.showIgnored {
 					continue
 				}
-				if filter != "" && !matchesFilter(filter, repo, mod, ws) {
+				if !m.workspaceInFilter(repo, mod, ws) {
 					continue
 				}
 				wsRows = append(wsRows, row{kind: rowWorkspace, repo: repo, mod: mod, ws: ws})
@@ -114,6 +114,29 @@ func (m *Model) flatten() []row {
 		}
 	}
 	return rows
+}
+
+// workspaceInFilter reports whether ws passes the `/` filter (always true when
+// no filter is set).
+func (m *Model) workspaceInFilter(repo *domain.Repo, mod *domain.Module, ws *domain.Workspace) bool {
+	filter := strings.ToLower(m.filterText)
+	return filter == "" || matchesFilter(filter, repo, mod, ws)
+}
+
+// moduleInFilter reports whether mod's row survives the `/` filter: it matches
+// itself, or has a visible workspace that does. Must agree with flatten's
+// modMatches.
+func (m *Model) moduleInFilter(repo *domain.Repo, mod *domain.Module) bool {
+	filter := strings.ToLower(m.filterText)
+	if filter == "" || matchesFilter(filter, repo, mod, nil) {
+		return true
+	}
+	for _, ws := range mod.Workspaces {
+		if (!m.ignore[ws.Key()] || m.showIgnored) && matchesFilter(filter, repo, mod, ws) {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesFilter(filter string, repo *domain.Repo, mod *domain.Module, ws *domain.Workspace) bool {

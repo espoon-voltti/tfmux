@@ -608,3 +608,66 @@ func TestFilter(t *testing.T) {
 		t.Errorf("filtered rows = %d: %v", len(m.rows), m.filterText)
 	}
 }
+
+// setFilter applies a `/` filter as if typed and confirmed with enter.
+func setFilter(m *Model, text string) {
+	keyPress(m, "/")
+	for _, r := range text {
+		m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	keyPress(m, "enter")
+}
+
+func TestPlanKeyOnModuleQueuesOnlyFilteredWorkspaces(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "default", "blue", "green")
+	setFilter(m, "blue")
+	m.cursor = 1 // module row
+	keyPress(m, "p")
+	if n := countTasks(m, runner.KindPlan); n != 1 || !m.hasTask(runner.KindPlan, mod.Path+"//blue") {
+		t.Errorf("plan tasks = %d, want only blue: %v", n, m.tasks)
+	}
+	drainPlanFinished(t, m, 1)
+}
+
+func TestPlanKeyOnRepoQueuesOnlyFilteredWorkspaces(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "default", "blue", "green")
+	setFilter(m, "gre")
+	m.cursor = 0 // repo row
+	keyPress(m, "p")
+	if n := countTasks(m, runner.KindPlan); n != 1 || !m.hasTask(runner.KindPlan, mod.Path+"//green") {
+		t.Errorf("plan tasks = %d, want only green: %v", n, m.tasks)
+	}
+	drainPlanFinished(t, m, 1)
+}
+
+// A filter matching the module path keeps all of its workspaces visible, so
+// all of them are targeted.
+func TestPlanKeyFilterMatchingModuleQueuesAllItsWorkspaces(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "default", "prod")
+	setFilter(m, "envs/")
+	m.cursor = 1 // module row
+	keyPress(m, "p")
+	if n := countTasks(m, runner.KindPlan); n != 2 {
+		t.Errorf("plan tasks = %d, want 2", n)
+	}
+	drainPlanFinished(t, m, 2)
+}
+
+func TestMassApplyOnlyTargetsFilteredWorkspaces(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "blue", "green")
+	changedPlan(m, mod, "blue")
+	changedPlan(m, mod, "green")
+	setFilter(m, "blue")
+	m.cursor = 0 // repo row
+	keyPress(m, "A")
+	if len(m.confirmApply) != 1 || m.confirmApply[0].Name != "blue" {
+		t.Fatalf("confirmApply = %v, want only blue", m.confirmApply)
+	}
+	if !strings.Contains(m.View(), `matching "blue"`) {
+		t.Error("confirmation prompt should mention the active filter")
+	}
+}

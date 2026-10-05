@@ -56,6 +56,27 @@ func TestInitUpgradeRepoQueuesAllModules(t *testing.T) {
 	drainInit(t, m, 2) // let the async jobs finish before TempDir cleanup
 }
 
+// I on a repo row under a filter only upgrades the modules left visible.
+func TestInitUpgradeRepoQueuesOnlyFilteredModules(t *testing.T) {
+	m := NewModel(config.Default(), state.New(t.TempDir()))
+	m.width, m.height = 100, 30
+	repo := &domain.Repo{Path: "/iac/repo1", Name: "repo1"}
+	m1 := &domain.Module{Repo: repo, Path: "/iac/repo1/a", RelPath: "a", TFBin: "terraform"}
+	m2 := &domain.Module{Repo: repo, Path: "/iac/repo1/b", RelPath: "b", TFBin: "terraform"}
+	repo.Modules = []*domain.Module{m1, m2}
+	m.repos = []*domain.Repo{repo}
+	m.filterText = "b"
+	m.reflow()
+	m.cursor = 0 // repo row
+
+	m.initUpgradeCurrent()
+
+	if m.hasTask(runner.KindInit, m1.Path) || !m.hasTask(runner.KindInit, m2.Path) {
+		t.Errorf("init -upgrade should be queued for b only: %v", m.tasks)
+	}
+	drainInit(t, m, 1)
+}
+
 // manyWorkspaces enumerates n workspaces so the list exceeds the screen.
 func manyWorkspaces(t *testing.T, m *Model, mod *domain.Module, n int) {
 	t.Helper()
