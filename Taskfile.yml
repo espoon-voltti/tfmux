@@ -43,6 +43,11 @@ tasks:
     cmds:
       - go vet ./...
 
+  vuln:
+    desc: Check for known vulnerabilities reachable from tfmux (needs network)
+    cmds:
+      - go tool govulncheck ./...
+
   fmt:
     desc: Format all Go sources
     cmds:

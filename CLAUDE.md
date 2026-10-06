@@ -28,6 +28,8 @@ but plain `go` works too:
   filter. `task test:race` for the race detector. `task test:cover` writes
   `coverage.out` and prints the total (`go tool cover -html=coverage.out` to
   browse it); CI runs it with `-race` and uploads the profile.
+- `task vuln` — govulncheck (a `tool` in `go.mod`); needs network, so it is
+  not part of `task check`, but CI runs it.
 - `task build` → `dist/tfmux`. `task run -- ls` to run a subcommand.
 - `task fmt` — `gofmt -w .`. Sources must be gofmt-clean (CI enforces).
 
