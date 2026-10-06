@@ -42,8 +42,26 @@ jobs:
       - name: go vet
         run: task vet
 
-      - name: Test (race detector)
-        run: task test:race
+      - name: Test (race detector, coverage)
+        run: task test:cover -- -race
+
+      - name: Coverage summary
+        if: always() && hashFiles('coverage.out') != ''
+        run: |
+          {
+            echo '## Coverage'
+            echo
+            echo '```'
+            go tool cover -func=coverage.out | tail -n 1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage profile
+        if: always() && hashFiles('coverage.out') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.out
 
       - name: Build
         run: task build

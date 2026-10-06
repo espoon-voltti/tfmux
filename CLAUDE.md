@@ -25,7 +25,9 @@ but plain `go` works too:
 - `task check` — **the pre-commit gate**: `fmt:check` → `vet` → `test`. Run this
   before committing.
 - `task test` / `go test ./...` — full suite. `task test -- -run TestFoo` to
-  filter. `task test:race` for the race detector.
+  filter. `task test:race` for the race detector. `task test:cover` writes
+  `coverage.out` and prints the total (`go tool cover -html=coverage.out` to
+  browse it); CI runs it with `-race` and uploads the profile.
 - `task build` → `dist/tfmux`. `task run -- ls` to run a subcommand.
 - `task fmt` — `gofmt -w .`. Sources must be gofmt-clean (CI enforces).
 

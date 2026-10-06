@@ -5,3 +5,4 @@
 /tfmux
 /dist/
 *.test
+/coverage.out

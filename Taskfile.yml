@@ -32,6 +32,12 @@ tasks:
     cmds:
       - go test -race ./...
 
+  test:cover:
+    desc: 'Run the test suite writing coverage.out, then print the total (pass extra go test flags after --)'
+    cmds:
+      - go test -coverprofile=coverage.out {{.CLI_ARGS}} ./...
+      - go tool cover -func=coverage.out | tail -n 1
+
   vet:
     desc: Run go vet
     cmds:
