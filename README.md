@@ -176,9 +176,7 @@ happens to share the filename `workspaces.json` under the XDG state dir):
   parse error on the repo's row, and that repo's modules behave as if it had
   no manifest at all.
 - A repo with no `.terraform-workspaces.json` is unaffected — workspaces come
-  from the enumeration cache / backend as before, and `import-workspaces` (see
-  `tfmux help`) remains the legacy way to pre-seed that cache for repos that
-  don't (yet) have a manifest.
+  from the enumeration cache / backend as before.
 
 ### Command templates
 
