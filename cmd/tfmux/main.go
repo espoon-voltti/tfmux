@@ -7,11 +7,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +49,8 @@ func run(args []string) error {
 	case "version", "--version", "-v":
 		fmt.Println("tfmux", version)
 		return nil
+	case "init":
+		return runInit(os.Stdin, os.Stdout)
 	case "ls":
 		return runLs(args)
 	case "import-workspaces":
@@ -65,6 +71,8 @@ func usage() {
 
 commands:
   tui        launch the interactive TUI (default)
+  init       create a minimal config file, asking for the directory your
+             infra repos are checked out under
   ls         print discovered repos, modules and git status
   ls --json  same, as JSON
   import-workspaces
@@ -81,10 +89,65 @@ func loadConfig() (*config.Config, error) {
 	cfg, err := config.LoadDefault()
 	if errors.Is(err, config.ErrNotFound) {
 		fmt.Fprintln(os.Stderr, "tfmux:", err)
-		fmt.Fprintln(os.Stderr, "tfmux: create it with at least: roots = [\"~/path/to/iac\"]")
+		fmt.Fprintln(os.Stderr, "tfmux: create it with `tfmux init`")
 		return cfg, nil
 	}
 	return cfg, err
+}
+
+// runInit asks on in for the directory the user's infra repos are checked
+// out under, defaulting to the working directory, and creates a config file
+// with that as its only root. It refuses to touch an existing config file.
+func runInit(in io.Reader, out io.Writer) error {
+	path, err := paths.ConfigFile()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return configExistsError(path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Directory your infra repos are checked out under [%s]: ", paths.AbbreviateHome(cwd))
+	answer, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	root := cwd
+	if answer = strings.TrimSpace(answer); answer != "" {
+		expanded, err := paths.ExpandHome(answer)
+		if err != nil {
+			return err
+		}
+		if root, err = filepath.Abs(expanded); err != nil {
+			return err
+		}
+	}
+	if info, err := os.Stat(root); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s does not exist", root)
+	} else if err != nil {
+		return err
+	} else if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", root)
+	}
+
+	if err := config.Create(path, []string{paths.AbbreviateHome(root)}); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return configExistsError(path)
+		}
+		return err
+	}
+	fmt.Fprintf(out, "Wrote %s. Run tfmux to start.\n", path)
+	return nil
+}
+
+func configExistsError(path string) error {
+	return fmt.Errorf("config file %s already exists; edit it to change settings", path)
 }
 
 func discoverWithGit(ctx context.Context, cfg *config.Config) ([]*domain.Repo, error) {

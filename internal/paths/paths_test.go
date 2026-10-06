@@ -62,3 +62,19 @@ func TestExpandHome(t *testing.T) {
 		}
 	}
 }
+
+func TestAbbreviateHome(t *testing.T) {
+	t.Setenv("HOME", "/home/test")
+	for in, want := range map[string]string{
+		"/home/test":          "~",
+		"/home/test/x/y":      "~/x/y",
+		"/home/testing/x":     "/home/testing/x",
+		"/home/test/../other": "/home/other",
+		"/abs/path":           "/abs/path",
+	} {
+		got := AbbreviateHome(filepath.Clean(in))
+		if got != want {
+			t.Errorf("AbbreviateHome(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

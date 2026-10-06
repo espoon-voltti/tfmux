@@ -150,3 +150,35 @@ func TestEffectiveInitParallelism(t *testing.T) {
 		}
 	})
 }
+
+func TestCreateWritesLoadableConfig(t *testing.T) {
+	t.Setenv("HOME", "/home/test")
+	// The config directory doesn't exist yet; Create makes it.
+	path := filepath.Join(t.TempDir(), "tfmux", "config.toml")
+	if err := Create(path, []string{"~/infra", `/odd "quoted" path`}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/home/test/infra", `/odd "quoted" path`}
+	if len(cfg.Roots) != len(want) || cfg.Roots[0] != want[0] || cfg.Roots[1] != want[1] {
+		t.Errorf("Roots = %q, want %q", cfg.Roots, want)
+	}
+	if def := Default(); cfg.Parallelism != def.Parallelism || cfg.TerraformBin != def.TerraformBin {
+		t.Errorf("non-root settings should keep their defaults, got %+v", cfg)
+	}
+}
+
+func TestCreateRefusesExistingFile(t *testing.T) {
+	path := writeConfig(t, "parallelism = 2\n")
+	err := Create(path, []string{"/somewhere"})
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("err = %v, want os.ErrExist", err)
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != "parallelism = 2\n" {
+		t.Errorf("existing file was modified: %q", got)
+	}
+}

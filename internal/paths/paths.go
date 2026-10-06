@@ -11,6 +11,7 @@ package paths
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const appDir = "tfmux"
@@ -68,4 +69,22 @@ func ExpandHome(p string) (string, error) {
 		return filepath.Join(home, p[2:]), nil
 	}
 	return p, nil
+}
+
+// AbbreviateHome is the inverse of ExpandHome: a path inside the home
+// directory is returned as "~" or "~/...". Any other path, or any path when
+// the home directory is unknown, is returned unchanged.
+func AbbreviateHome(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	rel, err := filepath.Rel(home, p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return p
+	}
+	if rel == "." {
+		return "~"
+	}
+	return "~/" + filepath.ToSlash(rel)
 }

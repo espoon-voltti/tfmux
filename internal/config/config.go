@@ -117,6 +117,34 @@ func LoadDefault() (*Config, error) {
 }
 
 // normalize expands ~ in paths and validates values.
+const createdHeader = "# tfmux configuration. For all settings, see config.example.toml in the\n" +
+	"# tfmux repository: https://github.com/espoon-voltti/tfmux\n\n"
+
+// Create writes a new config file at path that sets only roots, creating
+// its directory if needed. If path already exists it is left untouched and
+// the returned error wraps os.ErrExist.
+func Create(path string, roots []string) error {
+	body, err := toml.Marshal(struct {
+		Roots []string `toml:"roots"`
+	}{roots})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(createdHeader + string(body)); err != nil {
+		f.Close()
+		os.Remove(path)
+		return err
+	}
+	return f.Close()
+}
+
 func (c *Config) normalize() error {
 	if c.Parallelism < 1 {
 		return fmt.Errorf("parallelism must be >= 1, got %d", c.Parallelism)

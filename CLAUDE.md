@@ -39,8 +39,8 @@ test (`internal/ui/e2e_test.go`, via teatest).
 
 ## Layout
 
-- `cmd/tfmux/main.go` — entrypoint and subcommands: `tui` (default), `ls
-  [--json]`, `import-workspaces`, `version`.
+- `cmd/tfmux/main.go` — entrypoint and subcommands: `tui` (default), `init`,
+  `ls [--json]`, `import-workspaces`, `version`.
 - `internal/domain` — shared model (Repo → Module → Workspace) and statuses. Has
   **no dependencies on other tfmux packages**; keep it that way so every layer
   can import it.

@@ -51,11 +51,16 @@ go install github.com/espoon-voltti/tfmux/cmd/tfmux@latest
 brew install tmux   # only needed for applies; everything else works without
 ```
 
-Create `~/.config/tfmux/config.toml` (see [config.example.toml](config.example.toml)):
+Run `tfmux init` in the directory your infra repos are checked out under (or
+give it another one when asked). It writes a minimal
+`~/.config/tfmux/config.toml`:
 
 ```toml
-roots = ["~/work/iac"]
+roots = ['~/work/iac']
 ```
+
+It won't overwrite an existing config. For all settings, see
+[config.example.toml](config.example.toml).
 
 Run `tfmux` for the TUI, or `tfmux ls [--json]` for a scriptable dump.
 
