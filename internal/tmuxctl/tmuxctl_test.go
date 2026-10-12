@@ -58,6 +58,9 @@ func (f *fakeRunner) run(args ...string) ([]byte, error) {
 			return []byte(strings.Join(lines, "\n")), nil
 		}
 		return []byte(strings.Join(f.windows, "\n")), nil
+	case "kill-window":
+		delete(f.windowOpts, args[2])
+		return nil, nil
 	case "select-window":
 		if f.selectFails {
 			return nil, errors.New("no such window")
@@ -125,6 +128,48 @@ func TestLaunchApplyRemovesStaleExitFile(t *testing.T) {
 	}
 	if _, err := os.Stat(exitFile); !os.IsNotExist(err) {
 		t.Error("stale exit file not removed")
+	}
+}
+
+func TestLaunchApplyClosesFinishedEarlierWindowsOfSameWorkspace(t *testing.T) {
+	// @2 is an earlier failed apply of the same workspace, still waiting for
+	// Enter; @3 and @4 belong to other workspaces and must survive.
+	f := &fakeRunner{hasSession: true, windowOpts: map[string]string{
+		"@2": "/work/repo/envs/prod//prod@100",
+		"@3": "/work/repo/envs/prod//prod-eu@100",
+		"@4": "/work/repo/envs/other//prod@100",
+	}}
+	c := NewWithRunner("tfmux", f.run)
+	exitFile := filepath.Join(t.TempDir(), "apply.exit")
+	if err := os.WriteFile(exitFile, []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.LaunchApply(ApplySpec{ModuleDir: "/work/repo/envs/prod", Workspace: "prod", ExitFile: exitFile}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.windowOpts["@2"]; ok {
+		t.Error("earlier window of the same workspace was not closed")
+	}
+	for _, id := range []string{"@3", "@4"} {
+		if _, ok := f.windowOpts[id]; !ok {
+			t.Errorf("window %s of another workspace was closed", id)
+		}
+	}
+}
+
+func TestLaunchApplyKeepsEarlierWindowWithoutExitFile(t *testing.T) {
+	// No exit file: the earlier apply may still be running, so its window
+	// must not be killed.
+	f := &fakeRunner{hasSession: true, windowOpts: map[string]string{
+		"@2": "/work/repo/envs/prod//prod@100",
+	}}
+	c := NewWithRunner("tfmux", f.run)
+	exitFile := filepath.Join(t.TempDir(), "apply.exit")
+	if _, _, err := c.LaunchApply(ApplySpec{ModuleDir: "/work/repo/envs/prod", Workspace: "prod", ExitFile: exitFile}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.windowOpts["@2"]; !ok {
+		t.Error("window of a possibly running apply was closed")
 	}
 }
 

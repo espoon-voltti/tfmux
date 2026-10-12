@@ -42,7 +42,7 @@ tfmux
 - **Applies run in tmux**: `A` applies the saved plan file in a new window
   of a dedicated tmux session — interactive (answers prompts), attachable
   (`t`), and it survives tfmux exiting. Success closes the window; failures
-  keep it open for inspection.
+  keep it open for inspection until the next apply of the same workspace.
 
 ## Install
 

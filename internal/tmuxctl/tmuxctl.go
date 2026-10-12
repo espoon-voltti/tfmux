@@ -161,12 +161,24 @@ if [ "$ec" -ne 0 ]; then printf '\ntfmux: apply FAILED (exit %%s) — press Ente
 // to an entirely unrelated window. The token — stamped onto the window as a
 // tmux option — survives that: WindowFor looks a window up by token, not by
 // ID, so a recycled ID can never be mistaken for this apply.
+//
+// Windows left open by earlier failed applies of the same workspace are
+// closed first. Otherwise, when this apply succeeds and its window closes,
+// tmux moves an attached client to one of them, and an old failure reads as
+// this run's.
 func (c *Ctl) LaunchApply(spec ApplySpec) (windowID, token string, err error) {
+	// The exit file outlives its apply until the next launch removes it, so
+	// finding one means no earlier apply of this workspace is still running.
+	_, statErr := os.Stat(spec.ExitFile)
+	earlierFinished := statErr == nil
 	if err := os.Remove(spec.ExitFile); err != nil && !os.IsNotExist(err) {
 		return "", "", err
 	}
 	if err := c.ensureSession(); err != nil {
 		return "", "", err
+	}
+	if earlierFinished {
+		c.closeWindowsOf(spec.ModuleDir, spec.Workspace)
 	}
 	name := spec.Name
 	if name == "" {
@@ -178,12 +190,32 @@ func (c *Ctl) LaunchApply(spec ApplySpec) (windowID, token string, err error) {
 		return "", "", err
 	}
 	windowID = strings.TrimSpace(string(out))
-	token = fmt.Sprintf("%s//%s@%d", spec.ModuleDir, spec.Workspace, time.Now().UnixNano())
+	token = fmt.Sprintf("%s%d", tokenPrefix(spec.ModuleDir, spec.Workspace), time.Now().UnixNano())
 	if _, err := c.run("set-option", "-w", "-t", windowID, tokenOpt, token); err != nil {
 		_ = c.KillWindow(windowID)
 		return "", "", fmt.Errorf("stamping apply window: %w", err)
 	}
 	return windowID, token, nil
+}
+
+func tokenPrefix(moduleDir, workspace string) string {
+	return moduleDir + "//" + workspace + "@"
+}
+
+// closeWindowsOf kills every window stamped as an apply of this workspace.
+// Best effort: a window that can't be closed is merely a leftover.
+func (c *Ctl) closeWindowsOf(moduleDir, workspace string) {
+	out, err := c.run("list-windows", "-t", c.Session, "-F", "#{window_id} #{"+tokenOpt+"}")
+	if err != nil {
+		return
+	}
+	prefix := tokenPrefix(moduleDir, workspace)
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		id, tok, ok := strings.Cut(line, " ")
+		if ok && strings.HasPrefix(tok, prefix) {
+			_ = c.KillWindow(id)
+		}
+	}
 }
 
 // WindowFor returns the id of the window currently carrying this token, if
