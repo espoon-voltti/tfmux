@@ -20,6 +20,7 @@ type keyMap struct {
 	Cancel, CancelAll     key.Binding
 	Tasks                 key.Binding
 	Ignore, ShowIgnored   key.Binding
+	PendingOnly           key.Binding
 	InitUpgrade           key.Binding
 	Refresh, Rediscover   key.Binding
 	RefreshWorkspaces     key.Binding
@@ -50,6 +51,7 @@ var keys = keyMap{
 	Tasks:             key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "task pane")),
 	Ignore:            key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "toggle ignore")),
 	ShowIgnored:       key.NewBinding(key.WithKeys("Z"), key.WithHelp("Z", "show ignored")),
+	PendingOnly:       key.NewBinding(key.WithKeys("!"), key.WithHelp("!", "pending only")),
 	InitUpgrade:       key.NewBinding(key.WithKeys("I"), key.WithHelp("I", "init -upgrade (module/repo)")),
 	Refresh:           key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh status")),
 	Rediscover:        key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "re-discover")),
@@ -71,7 +73,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Left, k.Right, k.CollapseOthers, k.ExpandAll, k.Mark, k.Filter},
 		{k.Plan, k.PlanAll, k.Cancel, k.View, k.Output, k.Discard},
 		{k.Apply, k.InitUpgrade, k.Tasks, k.CancelAll},
-		{k.Ignore, k.ShowIgnored, k.Refresh, k.RefreshWorkspaces, k.Rediscover},
+		{k.Ignore, k.ShowIgnored, k.PendingOnly, k.Refresh, k.RefreshWorkspaces, k.Rediscover},
 		{k.Help, k.Esc, k.Quit},
 	}
 }

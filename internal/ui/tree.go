@@ -70,8 +70,9 @@ func repoRowID(path string) string     { return "repo:" + path }
 func moduleRowID(path string) string   { return "module:" + path }
 func workspaceRowID(key string) string { return "workspace:" + key }
 
-// flatten produces the visible rows honoring ignore, collapse and filter
-// state. Parent rows appear whenever any descendant matches the filter.
+// flatten produces the visible rows honoring ignore, collapse, the `/`
+// filter and the pending-only filter. Parent rows appear whenever any
+// descendant passes.
 func (m *Model) flatten() []row {
 	var rows []row
 	filter := strings.ToLower(m.filterText)
@@ -96,7 +97,7 @@ func (m *Model) flatten() []row {
 				}
 				wsRows = append(wsRows, row{kind: rowWorkspace, repo: repo, mod: mod, ws: ws})
 			}
-			modMatches := filter == "" || matchesFilter(filter, repo, mod, nil) || len(wsRows) > 0
+			modMatches := (filter == "" || matchesFilter(filter, repo, mod, nil)) && m.pendingShows(moduleRowID(mod.Path)) || len(wsRows) > 0
 			if !modMatches {
 				continue
 			}
@@ -105,7 +106,7 @@ func (m *Model) flatten() []row {
 				moduleRows = append(moduleRows, wsRows...)
 			}
 		}
-		repoMatches := filter == "" || strings.Contains(strings.ToLower(repo.Name), filter) || len(moduleRows) > 0
+		repoMatches := (filter == "" || strings.Contains(strings.ToLower(repo.Name), filter)) && m.pending == nil || len(moduleRows) > 0
 		if !repoMatches {
 			continue
 		}
@@ -117,23 +118,23 @@ func (m *Model) flatten() []row {
 	return rows
 }
 
-// workspaceInFilter reports whether ws passes the `/` filter (always true when
-// no filter is set).
+// workspaceInFilter reports whether ws passes the `/` filter and the
+// pending-only filter (always true when neither is set).
 func (m *Model) workspaceInFilter(repo *domain.Repo, mod *domain.Module, ws *domain.Workspace) bool {
 	filter := strings.ToLower(m.filterText)
-	return filter == "" || matchesFilter(filter, repo, mod, ws)
+	return (filter == "" || matchesFilter(filter, repo, mod, ws)) && m.pendingShows(workspaceRowID(ws.Key()))
 }
 
-// moduleInFilter reports whether mod's row survives the `/` filter: it matches
-// itself, or has a visible workspace that does. Must agree with flatten's
-// modMatches.
+// moduleInFilter reports whether mod's row survives the `/` and pending-only
+// filters: it passes itself, or has a visible workspace that does. Must
+// agree with flatten's modMatches.
 func (m *Model) moduleInFilter(repo *domain.Repo, mod *domain.Module) bool {
 	filter := strings.ToLower(m.filterText)
-	if filter == "" || matchesFilter(filter, repo, mod, nil) {
+	if (filter == "" || matchesFilter(filter, repo, mod, nil)) && m.pendingShows(moduleRowID(mod.Path)) {
 		return true
 	}
 	for _, ws := range mod.Workspaces {
-		if (!m.ignore[ws.Key()] || m.showIgnored) && matchesFilter(filter, repo, mod, ws) {
+		if (!m.ignore[ws.Key()] || m.showIgnored) && m.workspaceInFilter(repo, mod, ws) {
 			return true
 		}
 	}

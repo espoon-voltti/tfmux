@@ -100,10 +100,11 @@ same behind pins as `module-behind` rows. See [Dependencies](#dependencies).
 | `A` | apply saved plan in tmux — on a module/repo row, confirm then mass-apply every contained workspace whose plan has outstanding changes |
 | `d` | discard saved plan file |
 | `i` / `Z` | toggle ignore / show ignored |
+| `!` | pending only: show just the workspaces that need attention (`needs plan`, a saved plan with changes, a plan or apply error — what `tfmux pending` lists) and the modules with outdated pins, expanded. A snapshot: acting on an item doesn't drop it from the list; toggle off and on to refresh |
 | `I` | `terraform init -upgrade` for the module — or every module, on a repo row; when a pinned git module has a newer tag, asks first whether to bump the pin(s) in the `.tf` files |
 | `r` / `R` | refresh statuses / re-discover repos |
 | `w` | re-enumerate workspaces under the cursor (refreshes the cache) |
-| `/` | filter — repo/module-row actions (`p`, `A`, `x`, `I`, `w`) then only target what the filter leaves visible |
+| `/` | filter — repo/module-row actions (`p`, `A`, `x`, `I`, `w`) then only target what the filter (and `!`) leaves visible |
 | `?` | help, `q` quit |
 
 ## How it works (and why)

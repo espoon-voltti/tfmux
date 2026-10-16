@@ -90,6 +90,13 @@ type Model struct {
 	showIgnored bool
 	discovering bool
 
+	// pending holds the rowIDs of the modules and workspaces the pending-only
+	// filter shows, snapshotted when it was toggled on; nil when it is off.
+	// It is deliberately not recomputed as statuses change, so acting on an
+	// item never makes it vanish from under the cursor — toggle off and on
+	// to refresh.
+	pending map[string]bool
+
 	startDir      string // directory tfmux was launched from (for the initial jump)
 	jumpedToStart bool   // whether the one-time jump to the launch repo has run
 
@@ -1056,6 +1063,8 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if hasPrev {
 			m.focusNode(prev.rowID())
 		}
+	case key.Matches(msg, keys.PendingOnly):
+		m.togglePending()
 	case key.Matches(msg, keys.InitUpgrade):
 		return m, m.initUpgradeCurrent()
 	case key.Matches(msg, keys.Refresh):
@@ -1240,6 +1249,56 @@ func (m *Model) recountTree() {
 	}
 	m.nRepos, m.nModules, m.nWorkspaces, m.nNeedPlan, m.nModulesBehind = repos, mods, wss, needPlan, modsBehind
 }
+
+// togglePending switches the pending-only filter: on, it snapshots what
+// needs attention right now (honoring ignore/showIgnored like flatten) and
+// expands every repo and module holding such an item; off, the full tree is
+// back.
+func (m *Model) togglePending() {
+	if m.pending != nil {
+		m.pending = nil
+		m.status = "showing everything"
+		m.reflow()
+		return
+	}
+	m.pending = map[string]bool{}
+	var mods, wss int
+	for _, repo := range m.repos {
+		repoIgnored := m.ignore[repo.Path]
+		if repoIgnored && !m.showIgnored {
+			continue
+		}
+		for _, mod := range repo.Modules {
+			modIgnored := repoIgnored || m.ignore[mod.Path]
+			if modIgnored && !m.showIgnored {
+				continue
+			}
+			if len(attention.Module(mod.Deps, m.behind)) > 0 {
+				m.pending[moduleRowID(mod.Path)] = true
+				mods++
+				delete(m.collapsed, repo.Path)
+			}
+			for _, ws := range mod.Workspaces {
+				if (modIgnored || m.ignore[ws.Key()]) && !m.showIgnored {
+					continue
+				}
+				if len(m.reasons(ws.Key())) == 0 {
+					continue
+				}
+				m.pending[workspaceRowID(ws.Key())] = true
+				wss++
+				delete(m.collapsed, mod.Path)
+				delete(m.collapsed, repo.Path)
+			}
+		}
+	}
+	m.status = fmt.Sprintf("pending only: %d workspace(s), %d module(s) with outdated pins — ! to show everything", wss, mods)
+	m.reflow()
+}
+
+// pendingShows reports whether the pending-only filter lets a row through
+// (always, when it is off).
+func (m *Model) pendingShows(rowID string) bool { return m.pending == nil || m.pending[rowID] }
 
 // visibleRepos returns copies of the repos holding only the modules the user
 // manages (not ignored, not manifest-hidden), for the dependency index.
@@ -1955,6 +2014,9 @@ func (m *Model) renderHeader() string {
 	if m.nModulesBehind > 0 {
 		meta = append(meta, styleStale.Render(fmt.Sprintf("%d modules behind", m.nModulesBehind)))
 	}
+	if m.pending != nil {
+		meta = append(meta, styleChanges.Render("pending only"))
+	}
 	if !m.tmuxOK {
 		meta = append(meta, styleError.Render("tmux: unavailable"))
 	}
@@ -2024,6 +2086,9 @@ func (m *Model) renderTree(height int) string {
 	if len(m.rows) == 0 {
 		if m.discovering {
 			return styleDim.Render("  discovering repos…")
+		}
+		if m.pending != nil {
+			return styleDim.Render("  nothing pending — ! to show everything")
 		}
 		if len(m.cfg.Roots) == 0 {
 			return styleDim.Render("  no roots configured — add roots = [\"~/path/to/iac\"] to config.toml")
