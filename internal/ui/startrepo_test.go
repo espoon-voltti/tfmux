@@ -83,41 +83,31 @@ func TestJumpToStartRepoCollapsesOthers(t *testing.T) {
 	}
 }
 
-func TestJumpToStartRepoInModule(t *testing.T) {
-	m, _, repo2 := twoRepos(t)
-	m.startDir = "/iac/repo2/envs/dev" // launched from a module dir inside repo2
-	m.jumpToStartRepo()
-	if got := cursorRepo(t, m); got != repo2 {
-		t.Fatalf("expected cursor on repo2, got %q", got.Path)
-	}
-}
-
-func TestJumpToStartRepoAtRoot(t *testing.T) {
-	m, _, repo2 := twoRepos(t)
-	m.startDir = "/iac/repo2" // launched from the repo root itself
-	m.jumpToStartRepo()
-	if got := cursorRepo(t, m); got != repo2 {
-		t.Fatalf("expected cursor on repo2, got %q", got.Path)
-	}
-}
-
-func TestJumpToStartRepoOutside(t *testing.T) {
-	m, repo1, _ := twoRepos(t)
-	m.startDir = "/somewhere/else" // not under any managed repo
-	m.jumpToStartRepo()
-	if got := cursorRepo(t, m); got != repo1 {
-		t.Fatalf("cursor should stay put (repo1), got %q", got.Path)
-	}
-}
-
-// A sibling whose path is a string prefix of the launch dir but not a path
-// prefix ("/iac/repo2-staging" vs "/iac/repo2") must not match.
-func TestJumpToStartRepoNoSubstringMatch(t *testing.T) {
-	m, repo1, _ := twoRepos(t)
-	m.startDir = "/iac/repo2-staging"
-	m.jumpToStartRepo()
-	if got := cursorRepo(t, m); got != repo1 {
-		t.Fatalf("substring sibling should not match; expected repo1, got %q", got.Path)
+// The launch dir matches a repo by path prefix: its root, a dir inside it,
+// but never a sibling that merely shares a string prefix ("/iac/repo2-staging"
+// vs "/iac/repo2"); unmatched, the cursor stays put.
+func TestJumpToStartRepoMatching(t *testing.T) {
+	for _, c := range []struct {
+		name, startDir string
+		wantRepo2      bool
+	}{
+		{"module dir inside the repo", "/iac/repo2/envs/dev", true},
+		{"repo root", "/iac/repo2", true},
+		{"outside every repo", "/somewhere/else", false},
+		{"string-prefix sibling", "/iac/repo2-staging", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m, repo1, repo2 := twoRepos(t)
+			m.startDir = c.startDir
+			m.jumpToStartRepo()
+			want := repo1
+			if c.wantRepo2 {
+				want = repo2
+			}
+			if got := cursorRepo(t, m); got != want {
+				t.Errorf("cursor on %q, want %q", got.Path, want.Path)
+			}
+		})
 	}
 }
 

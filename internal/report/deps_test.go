@@ -5,27 +5,25 @@
 package report
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/espoon-voltti/tfmux/internal/discovery"
+	"github.com/espoon-voltti/tfmux/internal/gittest"
 	"github.com/espoon-voltti/tfmux/internal/state"
 )
 
 func TestDepsReportAcrossRepos(t *testing.T) {
 	root := t.TempDir()
 	base := gitRepoWithModule(t, root, "base-infra", "terraform/base")
-	if err := os.WriteFile(filepath.Join(base, "terraform/base/modules.tf"), []byte(`
+	gittest.WriteFile(t, filepath.Join(base, "terraform/base/modules.tf"), `
 module "waf" {
   source = "git::https://github.com/org/shared.git//modules/waf?ref=v16"
 }
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+`)
 	app := gitRepoWithModule(t, root, "app-infra", "terraform/app")
-	if err := os.WriteFile(filepath.Join(app, "terraform/app/main.tf"), []byte(`
+	gittest.WriteFile(t, filepath.Join(app, "terraform/app/main.tf"), `
 terraform {
   backend "s3" {
     bucket = "b"
@@ -43,9 +41,7 @@ data "terraform_remote_state" "base" {
 module "waf" {
   source = "git::https://github.com/org/shared.git//modules/waf?ref=v18"
 }
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+`)
 	repos, err := discovery.Discover([]string{root})
 	if err != nil {
 		t.Fatal(err)

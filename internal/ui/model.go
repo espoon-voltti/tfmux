@@ -33,6 +33,7 @@ import (
 	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/gitstatus"
 	"github.com/espoon-voltti/tfmux/internal/manifest"
+	"github.com/espoon-voltti/tfmux/internal/report"
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/tfexec"
@@ -737,36 +738,24 @@ func (m *Model) applyDone(ev runner.Event) tea.Cmd {
 	return saveRunCmd(m.store, rec)
 }
 
-// invalidateDownstream marks the planned workspaces of every root reading
-// the applied workspace's state as needing a plan, when the apply changed
-// outputs. It walks one hop only: marking is not an apply, so nothing
-// cascades, and roots that read each other's state cannot loop. Returns how
-// many records were marked and the commands persisting them.
+// invalidateDownstream marks the in-memory records of the applied
+// workspace's planned downstream workspaces (see report.Downstream) as
+// needing a plan. Returns how many records were marked and the commands
+// persisting them.
 func (m *Model) invalidateDownstream(upstream *state.RunRecord, now time.Time) (int, []tea.Cmd) {
-	if !upstream.OutputsChanged {
-		return 0, nil
-	}
 	up := m.findModule(upstream.ModulePath)
-	if up == nil || up.Deps == nil || up.Deps.Backend == nil {
+	if up == nil {
 		return 0, nil
 	}
-	by := up.Repo.Name + "/" + up.RelPath + "//" + upstream.Workspace
+	by := report.InvalidationBy(up, upstream.Workspace)
 	var cmds []tea.Cmd
-	for _, down := range m.index.DependentsOfState(up) {
-		if down == up {
+	for _, ws := range report.Downstream(m.index, up, upstream) {
+		rec := m.runs[ws.Key()]
+		if rec == nil || rec.Invalidated != nil {
 			continue
 		}
-		for _, ws := range down.Workspaces {
-			rec := m.runs[ws.Key()]
-			if rec == nil || rec.Invalidated != nil {
-				continue
-			}
-			if !deps.ReadsWorkspace(down, up, ws.Name, upstream.Workspace) {
-				continue
-			}
-			rec.Invalidated = &state.Invalidation{By: by, At: now}
-			cmds = append(cmds, saveRunCmd(m.store, rec))
-		}
+		rec.Invalidated = &state.Invalidation{By: by, At: now}
+		cmds = append(cmds, saveRunCmd(m.store, rec))
 	}
 	return len(cmds), cmds
 }
@@ -1228,7 +1217,7 @@ func (m *Model) recountTree() {
 		}
 		repos++
 		for _, mod := range repo.Modules {
-			modIgnored := repoIgnored || m.ignore[mod.Path]
+			modIgnored := m.moduleHidden(mod)
 			if modIgnored && !m.showIgnored {
 				continue
 			}
@@ -1269,7 +1258,7 @@ func (m *Model) togglePending() {
 			continue
 		}
 		for _, mod := range repo.Modules {
-			modIgnored := repoIgnored || m.ignore[mod.Path]
+			modIgnored := m.moduleHidden(mod)
 			if modIgnored && !m.showIgnored {
 				continue
 			}
@@ -1626,26 +1615,25 @@ func (m *Model) cancelCurrent() {
 		}
 	}
 	for _, k := range keys {
-		m.runner.Cancel(k)
-		m.forgetTasks(k)
+		m.runner.CancelKey(k)
+		for _, kind := range []runner.Kind{runner.KindEnumerate, runner.KindInit, runner.KindPlan, runner.KindApply, runner.KindOutput} {
+			m.forgetTask(kind, k)
+		}
 	}
 }
 
-// forgetTasks optimistically drops a key's in-flight tasks so the UI reacts to
-// a cancel immediately (the runner's Canceled event is then a no-op). A running
+// forgetTask optimistically drops an in-flight task so the UI reacts to a
+// cancel immediately (the runner's Canceled event is then a no-op). A running
 // apply is kept — it lives on in tmux and is left attached.
-func (m *Model) forgetTasks(key string) {
-	for _, kind := range []runner.Kind{runner.KindEnumerate, runner.KindInit, runner.KindPlan, runner.KindApply} {
-		if ts := m.task(kind, key); ts != nil {
-			if kind == runner.KindApply && ts.running {
-				continue
-			}
-			if ts.running {
-				m.markDone(ts, "canceled", false)
-			}
-			delete(m.tasks, runner.TaskID(kind, key))
-		}
+func (m *Model) forgetTask(kind runner.Kind, key string) {
+	ts := m.task(kind, key)
+	if ts == nil || (kind == runner.KindApply && ts.running) {
+		return
 	}
+	if ts.running {
+		m.markDone(ts, "canceled", false)
+	}
+	delete(m.tasks, runner.TaskID(kind, key))
 }
 
 // revealModule brings a newly-unignored module up to date: a manifest-listed

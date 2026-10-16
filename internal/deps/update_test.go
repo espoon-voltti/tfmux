@@ -45,21 +45,20 @@ func TestNewerTagsOnlyForPinsWithANewerTag(t *testing.T) {
 	}
 }
 
-func TestRewriteSourcesReplacesQuotedSourcesInPlace(t *testing.T) {
+func TestRewriteSourcesReplacesSourceAttributesInPlace(t *testing.T) {
 	dir := t.TempDir()
 	old := "git::https://github.com/org/shared.git//modules/waf?ref=v16"
-	main := "module \"waf\" {\n  source = \"" + old + "\"\n}\nmodule \"waf2\" {\n  source = \"" + old + "\"\n}\n"
+	bumped := BumpRef(old, "v18")
+	main := "module \"waf\" {\n  source = \"" + old + "\"\n}\nmodule \"waf2\" {\n\tsource=\"" + old + "\"\n}\n" +
+		"# was \"" + old + "\"\nvariable \"origin\" {\n  default = \"" + old + "\"\n}\n"
 	other := "module \"s3\" {\n  source = \"git::https://github.com/org/shared.git//modules/s3?ref=v16\"\n}\n"
-	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(main), 0o640); err != nil {
+	write(t, filepath.Join(dir, "main.tf"), main)
+	if err := os.Chmod(filepath.Join(dir, "main.tf"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "other.tf"), []byte(other), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "notes.md"), []byte(old), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	refs, files, err := RewriteSources([]string{dir}, map[string]string{old: BumpRef(old, "v18")})
+	write(t, filepath.Join(dir, "other.tf"), other)
+	write(t, filepath.Join(dir, "notes.md"), old)
+	refs, files, err := RewriteSources([]string{dir}, map[string]string{old: bumped})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,9 +66,10 @@ func TestRewriteSourcesReplacesQuotedSourcesInPlace(t *testing.T) {
 		t.Errorf("refs=%d files=%d, want 2 refs in 1 file", refs, files)
 	}
 	got, _ := os.ReadFile(filepath.Join(dir, "main.tf"))
-	want := "module \"waf\" {\n  source = \"git::https://github.com/org/shared.git//modules/waf?ref=v18\"\n}\nmodule \"waf2\" {\n  source = \"git::https://github.com/org/shared.git//modules/waf?ref=v18\"\n}\n"
+	want := "module \"waf\" {\n  source = \"" + bumped + "\"\n}\nmodule \"waf2\" {\n\tsource=\"" + bumped + "\"\n}\n" +
+		"# was \"" + old + "\"\nvariable \"origin\" {\n  default = \"" + old + "\"\n}\n"
 	if string(got) != want {
-		t.Errorf("main.tf:\n%s", got)
+		t.Errorf("main.tf: only source attributes may change, got:\n%s", got)
 	}
 	if info, _ := os.Stat(filepath.Join(dir, "main.tf")); info.Mode().Perm() != 0o640 {
 		t.Errorf("permissions changed to %v", info.Mode().Perm())

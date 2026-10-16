@@ -62,29 +62,6 @@ func TestWorkspaceList(t *testing.T) {
 	}
 }
 
-// Regression: an init-shaped failure must surface via ExitCode/Output, not
-// be misread as an empty workspace list.
-func TestWorkspaceListNeedsInit(t *testing.T) {
-	tf, _ := newTF(t)
-	tf.Env = append(tf.Env, "TFMUX_FAKE_NEED_INIT=1")
-	if err := os.MkdirAll(filepath.Join(tf.Dir, ".terraform"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	res, got, err := tf.WorkspaceList(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.ExitCode == 0 {
-		t.Fatalf("expected a failing exit code, got 0 with output:\n%s", res.Output)
-	}
-	if got != nil {
-		t.Errorf("workspaces = %v, want nil", got)
-	}
-	if !NeedsInit(res.Output) {
-		t.Errorf("output did not look init-shaped: %q", res.Output)
-	}
-}
-
 func TestPlanWorkspaceEnvAndExitCodes(t *testing.T) {
 	for _, exit := range []int{PlanClean, PlanError, PlanChanges} {
 		tf, logFile := newTF(t)
@@ -113,30 +90,6 @@ func TestPlanWorkspaceEnvAndExitCodes(t *testing.T) {
 	}
 }
 
-// Regression: Plan runs exactly once and reports an init-shaped failure
-// as-is — retrying belongs to the caller (see internal/runner), not tfexec.
-func TestPlanNeedsInitNoAutoRetry(t *testing.T) {
-	tf, logFile := newTF(t)
-	tf.Env = append(tf.Env, "TFMUX_FAKE_NEED_INIT=1")
-	if err := os.MkdirAll(filepath.Join(tf.Dir, ".terraform"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	res, err := tf.Plan(context.Background(), "prod", filepath.Join(t.TempDir(), "p"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.ExitCode == 0 {
-		t.Fatalf("expected a failing exit code, got 0 with output:\n%s", res.Output)
-	}
-	if !NeedsInit(res.Output) {
-		t.Errorf("output did not look init-shaped: %q", res.Output)
-	}
-	cs := calls(t, logFile)
-	if len(cs) != 1 {
-		t.Fatalf("expected exactly one plan call, got %v", cs)
-	}
-}
-
 func TestOutput(t *testing.T) {
 	tf, logFile := newTF(t)
 	if err := os.MkdirAll(filepath.Join(tf.Dir, ".terraform"), 0o755); err != nil {
@@ -158,24 +111,41 @@ func TestOutput(t *testing.T) {
 	}
 }
 
-// Regression: Output on an uninitialized module fails outright — it's the
-// caller's job to check Initialized() and init first (see internal/runner).
-func TestOutputFailsWhenMissingInit(t *testing.T) {
-	tf, logFile := newTF(t)
-	tf.Env = append(tf.Env, "TFMUX_FAKE_NEED_INIT=1")
-	res, err := tf.Output(context.Background(), "prod")
-	if err != nil {
-		t.Fatal(err)
+// Every verb runs exactly once and reports an init-shaped failure as-is:
+// retrying belongs to the caller (see internal/runner), and a failed
+// workspace list must not read as an empty one.
+func TestInitShapedFailureSurfacesWithoutRetry(t *testing.T) {
+	verbs := map[string]func(tf TF) (Result, error){
+		"workspace list": func(tf TF) (Result, error) {
+			res, got, err := tf.WorkspaceList(context.Background())
+			if got != nil {
+				t.Errorf("workspaces = %v, want nil", got)
+			}
+			return res, err
+		},
+		"plan": func(tf TF) (Result, error) {
+			return tf.Plan(context.Background(), "prod", filepath.Join(t.TempDir(), "p"))
+		},
+		"output": func(tf TF) (Result, error) { return tf.Output(context.Background(), "prod") },
 	}
-	if res.ExitCode == 0 {
-		t.Fatalf("expected a failing exit code, got 0 with output:\n%s", res.Output)
-	}
-	if !NeedsInit(res.Output) {
-		t.Errorf("output did not look init-shaped: %q", res.Output)
-	}
-	cs := calls(t, logFile)
-	if len(cs) != 1 || !strings.Contains(cs[0], "output") {
-		t.Errorf("expected exactly one output call, got %v", cs)
+	for name, run := range verbs {
+		t.Run(name, func(t *testing.T) {
+			tf, logFile := newTF(t)
+			tf.Env = append(tf.Env, "TFMUX_FAKE_NEED_INIT=1")
+			res, err := run(tf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.ExitCode == 0 {
+				t.Fatalf("expected a failing exit code, got 0 with output:\n%s", res.Output)
+			}
+			if !NeedsInit(res.Output) {
+				t.Errorf("output did not look init-shaped: %q", res.Output)
+			}
+			if cs := calls(t, logFile); len(cs) != 1 {
+				t.Errorf("expected exactly one call, got %v", cs)
+			}
+		})
 	}
 }
 
@@ -206,18 +176,7 @@ func TestClassifyPlanError(t *testing.T) {
 	}
 }
 
-func TestVersion(t *testing.T) {
-	tf, _ := newTF(t)
-	v, err := tf.Version(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v != "1.9.9" {
-		t.Errorf("version = %q", v)
-	}
-}
-
-func TestOutTeesLiveOutput(t *testing.T) {
+func TestVersionAndOutTeesLiveOutput(t *testing.T) {
 	tf, _ := newTF(t)
 	var live strings.Builder
 	tf.Out = &live

@@ -170,11 +170,13 @@ same behind pins as `module-behind` rows. See [Dependencies](#dependencies).
   module's tree at `v16` with the newest tag, with `HEAD` and with the working
   tree, and badges the root `↑ waf v16→v18`, `unreleased` or `uncommitted`.
   tfmux never fetches: `git fetch --tags` the shared repo first. A ref that
-  isn't present locally shows as `ref not found locally`. Checked on
-  discovery and on `r`. `I` on such a root offers to rewrite its `?ref=`
-  pins to the newest tag (in the root's own `.tf` files and those of its
-  in-repo local modules) before the `init -upgrade` that would adopt them;
-  the edit is uncommitted, so review it with `git diff`.
+  isn't present locally shows as `ref not found locally`; a ref that already
+  contains the newest tag (a branch, or a later commit) is never reported
+  behind it. Checked on discovery and on `r`. `I` on such a root offers to
+  rewrite the `source = "…"` attributes pinning an older tag to the newest
+  one (in the root's own `.tf` files and those of its in-repo local modules)
+  before the `init -upgrade` that would adopt them; the edit is uncommitted,
+  so review it with `git diff`.
 - **Applying an upstream root marks its downstream roots.** A plan records
   whether it changes outputs. When such a plan is applied, every planned
   workspace of a root that reads that state via `terraform_remote_state` (in

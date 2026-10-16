@@ -415,6 +415,7 @@ func (s *Server) refresh(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}
 	}
 	repos, ignore, _ := s.snapshot()
 	var out RefreshOut
+	s.mu.Lock()
 	for _, repo := range report.VisibleRepos(ignore, repos) {
 		out.Repos++
 		for _, mod := range repo.Modules {
@@ -422,6 +423,7 @@ func (s *Server) refresh(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}
 			out.Workspaces += len(mod.Workspaces)
 		}
 	}
+	s.mu.Unlock()
 	s.logf("refresh: %d repos, %d modules, %d workspaces", out.Repos, out.Modules, out.Workspaces)
 	return text(fmt.Sprintf("%d repos, %d root modules, %d workspaces\n", out.Repos, out.Modules, out.Workspaces)), out, nil
 }
@@ -456,38 +458,13 @@ func (s *Server) apply(ctx context.Context, _ *mcp.CallToolRequest, in Workspace
 	if err != nil {
 		return nil, ApplyOut{}, err
 	}
-	out := ApplyOut{Module: in.Module, Workspace: in.Workspace}
-	rec, _ = s.store.LoadRun(mod.Path, ws.Name)
-	now := time.Now()
-	switch {
-	case ev.Phase == runner.PhaseFailed || ev.Phase == runner.PhaseCanceled:
+	out := ApplyOut{Module: in.Module, Workspace: in.Workspace, ExitCode: ev.ApplyExit}
+	if outcome, ok := s.takeApplyOutcome(ws.Key()); ok {
+		out.Status = outcome.status
+	} else {
 		out.Status = fmt.Sprintf("apply %s: %s", ev.Phase, ev.Err)
-	case ev.Aborted:
-		out.Status = "apply window closed without finishing — state unknown, re-plan"
-		if rec != nil && rec.Apply != nil {
-			rec.Apply.Finished, rec.Apply.Aborted = &now, true
-			_ = s.store.SaveRun(rec)
-		}
-	case ev.ApplyExit != nil:
-		out.ExitCode = ev.ApplyExit
-		if rec != nil && rec.Apply != nil {
-			rec.Apply.Finished, rec.Apply.ExitCode = &now, ev.ApplyExit
-			_ = s.store.SaveRun(rec)
-		}
-		if *ev.ApplyExit == 0 {
-			out.Status = "applied"
-			_ = s.store.DiscardPlan(mod.Path, ws.Name)
-			_, _, ix := s.snapshot()
-			if rec != nil {
-				if marked := report.InvalidateDownstream(s.store, ix, mod, rec, now); len(marked) > 0 {
-					out.Status += fmt.Sprintf("; %d downstream workspace(s) now need a plan: %s", len(marked), strings.Join(marked, ", "))
-				}
-			}
-		} else {
-			out.Status = fmt.Sprintf("apply failed (exit %d) — its tmux window is left open for inspection", *ev.ApplyExit)
-		}
+		s.logf("apply %s//%s: %s", in.Module, in.Workspace, out.Status)
 	}
-	s.logf("apply %s//%s: %s", in.Module, in.Workspace, out.Status)
 	return text(out.Status + "\n"), out, nil
 }
 

@@ -6,53 +6,18 @@ package gitstatus
 
 import (
 	"context"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/espoon-voltti/tfmux/internal/gittest"
 )
 
-// gitRepo creates a throwaway repo and returns its path with a helper that
-// runs git in it.
-func gitRepo(t *testing.T) (string, func(args ...string)) {
-	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-	dir := t.TempDir()
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
-			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
-			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
-		)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-b", "main")
-	return dir, run
-}
-
-func writeFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestFingerprintTracksOnlyGivenPaths(t *testing.T) {
-	dir, run := gitRepo(t)
-	writeFile(t, filepath.Join(dir, "envs/prod/main.tf"), "a")
-	writeFile(t, filepath.Join(dir, "envs/staging/main.tf"), "a")
-	writeFile(t, filepath.Join(dir, "modules/x/main.tf"), "a")
-	run("add", ".")
-	run("commit", "-m", "init")
+	dir := gittest.Init(t)
+	gittest.WriteFile(t, filepath.Join(dir, "envs/prod/main.tf"), "a")
+	gittest.WriteFile(t, filepath.Join(dir, "envs/staging/main.tf"), "a")
+	gittest.WriteFile(t, filepath.Join(dir, "modules/x/main.tf"), "a")
+	gittest.CommitAll(t, dir, "init")
 	ctx := context.Background()
 	fp := func(paths ...string) string {
 		t.Helper()
@@ -69,42 +34,42 @@ func TestFingerprintTracksOnlyGivenPaths(t *testing.T) {
 	}
 
 	// A commit elsewhere in the repo leaves the module's fingerprint alone.
-	writeFile(t, filepath.Join(dir, "envs/staging/main.tf"), "b")
-	run("commit", "-am", "staging")
+	gittest.WriteFile(t, filepath.Join(dir, "envs/staging/main.tf"), "b")
+	gittest.Run(t, dir, "commit", "-q", "-am", "staging")
 	if fp("envs/prod") != base {
 		t.Error("unrelated commit changed the fingerprint")
 	}
 
 	// An uncommitted edit in the module changes it; committing it keeps it
 	// changed (the tree differs from the original).
-	writeFile(t, filepath.Join(dir, "envs/prod/main.tf"), "b")
+	gittest.WriteFile(t, filepath.Join(dir, "envs/prod/main.tf"), "b")
 	dirty := fp("envs/prod")
 	if dirty == base {
 		t.Error("dirty edit did not change the fingerprint")
 	}
-	run("commit", "-am", "prod")
+	gittest.Run(t, dir, "commit", "-q", "-am", "prod")
 	committed := fp("envs/prod")
 	if committed == base || committed == dirty {
 		t.Error("committed edit should differ from both the original and the dirty state")
 	}
 
 	// An untracked file inside the module counts.
-	writeFile(t, filepath.Join(dir, "envs/prod/new.tf"), "c")
+	gittest.WriteFile(t, filepath.Join(dir, "envs/prod/new.tf"), "c")
 	if fp("envs/prod") == committed {
 		t.Error("untracked file did not change the fingerprint")
 	}
 
 	// A dependency path is part of the fingerprint when listed.
 	withDep := fp("envs/prod", "modules/x")
-	writeFile(t, filepath.Join(dir, "modules/x/main.tf"), "b")
+	gittest.WriteFile(t, filepath.Join(dir, "modules/x/main.tf"), "b")
 	if fp("envs/prod", "modules/x") == withDep {
 		t.Error("edit in a listed dependency path did not change the fingerprint")
 	}
 }
 
 func TestFingerprintUnbornBranchAndMissingPath(t *testing.T) {
-	dir, _ := gitRepo(t)
-	writeFile(t, filepath.Join(dir, "envs/prod/main.tf"), "a")
+	dir := gittest.Init(t)
+	gittest.WriteFile(t, filepath.Join(dir, "envs/prod/main.tf"), "a")
 	s, err := Fingerprint(context.Background(), dir, []string{"envs/prod", "nope"})
 	if err != nil {
 		t.Fatal(err)
@@ -115,16 +80,15 @@ func TestFingerprintUnbornBranchAndMissingPath(t *testing.T) {
 }
 
 func TestRefsPlumbing(t *testing.T) {
-	dir, run := gitRepo(t)
-	writeFile(t, filepath.Join(dir, "modules/waf/main.tf"), "a")
-	run("add", ".")
-	run("commit", "-m", "v1")
-	run("tag", "v1")
-	writeFile(t, filepath.Join(dir, "modules/waf/main.tf"), "b")
-	run("commit", "-am", "v2")
-	run("tag", "v2")
-	run("tag", "v10")
-	run("remote", "add", "origin", "https://github.com/org/shared")
+	dir := gittest.Init(t)
+	gittest.WriteFile(t, filepath.Join(dir, "modules/waf/main.tf"), "a")
+	gittest.CommitAll(t, dir, "v1")
+	gittest.Run(t, dir, "tag", "v1")
+	gittest.WriteFile(t, filepath.Join(dir, "modules/waf/main.tf"), "b")
+	gittest.Run(t, dir, "commit", "-q", "-am", "v2")
+	gittest.Run(t, dir, "tag", "v2")
+	gittest.Run(t, dir, "tag", "v10")
+	gittest.Run(t, dir, "remote", "add", "origin", "https://github.com/org/shared")
 	ctx := context.Background()
 
 	v1, found, err := TreeID(ctx, dir, "v1", "modules/waf")
@@ -144,12 +108,23 @@ func TestRefsPlumbing(t *testing.T) {
 	if tag, err := NewestTag(ctx, dir); err != nil || tag != "v10" {
 		t.Errorf("newest tag = %q, %v (version sort expected)", tag, err)
 	}
+	for _, c := range []struct {
+		ancestor, descendant string
+		want                 bool
+	}{{"v1", "main", true}, {"v2", "v1", false}, {"v2", "v2", true}, {"nope", "main", false}} {
+		if got, err := IsAncestor(ctx, dir, c.ancestor, c.descendant); err != nil || got != c.want {
+			t.Errorf("IsAncestor(%s, %s) = %v, %v; want %v", c.ancestor, c.descendant, got, err, c.want)
+		}
+	}
 	if dirty, _ := HasChanges(ctx, dir, []string{"modules/waf"}); dirty {
 		t.Error("clean checkout reported dirty")
 	}
-	writeFile(t, filepath.Join(dir, "modules/waf/main.tf"), "c")
+	gittest.WriteFile(t, filepath.Join(dir, "modules/waf/main.tf"), "c")
 	if dirty, _ := HasChanges(ctx, dir, []string{"modules/waf"}); !dirty {
 		t.Error("edit not reported")
+	}
+	if dirty, err := HasChanges(ctx, dir, []string{""}); err != nil || !dirty {
+		t.Errorf("empty path should mean the whole tree: dirty=%v err=%v", dirty, err)
 	}
 	if url := RemoteURL(ctx, dir); url != "https://github.com/org/shared" {
 		t.Errorf("remote = %q", url)

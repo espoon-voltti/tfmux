@@ -7,28 +7,10 @@ package ui
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/tftest"
 )
-
-// drainKind drains n terminal events of the given kind off the runner channel
-// so a backgrounded task doesn't leak its goroutine past the test.
-func drainKind(t *testing.T, m *Model, kind runner.Kind, n int) {
-	t.Helper()
-	timeout := time.After(15 * time.Second)
-	for n > 0 {
-		select {
-		case ev := <-m.runner.Events:
-			if ev.Kind == kind && ev.Phase.Terminal() {
-				n--
-			}
-		case <-timeout:
-			t.Fatalf("timed out draining %s events", kind)
-		}
-	}
-}
 
 func initDone(m *Model, mod string) {
 	m.updateRunnerEvent(runner.Event{
@@ -56,7 +38,7 @@ func TestInitDoneEnumeratesWhenNoWorkspaces(t *testing.T) {
 	if !m.hasTask(runner.KindEnumerate, mod.Path) {
 		t.Fatal("init -upgrade should auto-enumerate when the module has no workspaces")
 	}
-	drainKind(t, m, runner.KindEnumerate, 1)
+	drain(t, m, runner.KindEnumerate, 1)
 }
 
 // A failed init leaves its error on the module row (headlined by terraform's

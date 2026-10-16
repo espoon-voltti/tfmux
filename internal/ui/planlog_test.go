@@ -36,26 +36,16 @@ func TestOpenLogStartsBottomForPlanOnly(t *testing.T) {
 	}
 }
 
-// A completed plan log lands on its add/change/destroy summary at the end.
-func TestPlanLogRendersAtBottom(t *testing.T) {
-	m, mod := fixtureModel(t)
-	id := runner.TaskID(runner.KindPlan, mod.Path+"//prod")
-	m.detailBottom = true
-	m.detailFollow = ""
-	renderLog(m, id)
-	if !m.detail.AtBottom() {
-		t.Fatal("plan log should open scrolled to the bottom")
-	}
-}
-
-// A module log still opens at the top.
-func TestModuleLogRendersAtTop(t *testing.T) {
-	m, mod := fixtureModel(t)
-	id := runner.TaskID(runner.KindEnumerate, mod.Path)
-	m.detailBottom = false
-	m.detailFollow = ""
-	renderLog(m, id)
-	if !m.detail.AtTop() {
-		t.Fatal("module log should open at the top")
+// A completed plan log lands on its add/change/destroy summary at the end; a
+// module log opens at the top.
+func TestLogRendersAtFlaggedEnd(t *testing.T) {
+	for _, bottom := range []bool{true, false} {
+		m, mod := fixtureModel(t)
+		m.detailBottom = bottom
+		m.detailFollow = ""
+		renderLog(m, runner.TaskID(runner.KindPlan, mod.Path+"//prod"))
+		if m.detail.AtBottom() != bottom || m.detail.AtTop() == bottom {
+			t.Errorf("detailBottom=%v: AtBottom=%v AtTop=%v", bottom, m.detail.AtBottom(), m.detail.AtTop())
+		}
 	}
 }

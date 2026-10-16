@@ -7,7 +7,6 @@ package report
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +16,7 @@ import (
 	"github.com/espoon-voltti/tfmux/internal/config"
 	"github.com/espoon-voltti/tfmux/internal/discovery"
 	"github.com/espoon-voltti/tfmux/internal/gitstatus"
+	"github.com/espoon-voltti/tfmux/internal/gittest"
 	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/tfexec"
 )
@@ -35,32 +35,10 @@ const backendTF = `terraform {
 func gitRepoWithModule(t *testing.T, root, name, rel string) string {
 	t.Helper()
 	repo := filepath.Join(root, name)
-	if err := os.MkdirAll(filepath.Join(repo, rel), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, rel, "main.tf"), []byte(backendTF), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	git(t, repo, "init", "-q", "-b", "main")
-	git(t, repo, "add", ".")
-	git(t, repo, "commit", "-q", "-m", "init")
+	gittest.WriteFile(t, filepath.Join(repo, rel, "main.tf"), backendTF)
+	gittest.Run(t, repo, "init", "-q", "-b", "main")
+	gittest.CommitAll(t, repo, "init")
 	return repo
-}
-
-func git(t *testing.T, repo string, args ...string) {
-	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
-		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
 }
 
 func TestPendingReport(t *testing.T) {
@@ -122,8 +100,21 @@ func TestPendingReport(t *testing.T) {
 	var out strings.Builder
 	PrintPending(&out, rows, time.Now())
 	text := out.String()
-	if !strings.Contains(text, "repo1") || !strings.Contains(text, "envs/prod") || !strings.Contains(text, "module changed since plan") {
+	if !strings.Contains(text, "repo1") || !strings.Contains(text, "envs/prod") || !strings.Contains(text, "module changed since plan") || !strings.Contains(text, "planned just now") {
 		t.Errorf("text output:\n%s", text)
+	}
+}
+
+func TestAgo(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		30 * time.Second: "just now",
+		5 * time.Minute:  "5m ago",
+		3 * time.Hour:    "3h ago",
+		50 * time.Hour:   "2d ago",
+	} {
+		if got := Ago(d); got != want {
+			t.Errorf("Ago(%v) = %q, want %q", d, got, want)
+		}
 	}
 }
 
@@ -143,33 +134,22 @@ func TestPendingReportNotesUnknownWorkspaces(t *testing.T) {
 func TestPendingReportsModulesBehind(t *testing.T) {
 	root := t.TempDir()
 	shared := filepath.Join(root, "shared")
-	if err := os.MkdirAll(filepath.Join(shared, "modules/waf"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(shared, "modules/waf/main.tf"), []byte("# v1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	git(t, shared, "init", "-q", "-b", "main")
-	git(t, shared, "remote", "add", "origin", "https://github.com/org/shared")
-	git(t, shared, "add", ".")
-	git(t, shared, "commit", "-q", "-m", "v1")
-	git(t, shared, "tag", "v1")
-	if err := os.WriteFile(filepath.Join(shared, "modules/waf/main.tf"), []byte("# v2\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	git(t, shared, "commit", "-q", "-am", "v2")
-	git(t, shared, "tag", "v2")
+	gittest.WriteFile(t, filepath.Join(shared, "modules/waf/main.tf"), "# v1\n")
+	gittest.Run(t, shared, "init", "-q", "-b", "main")
+	gittest.Run(t, shared, "remote", "add", "origin", "https://github.com/org/shared")
+	gittest.CommitAll(t, shared, "v1")
+	gittest.Run(t, shared, "tag", "v1")
+	gittest.WriteFile(t, filepath.Join(shared, "modules/waf/main.tf"), "# v2\n")
+	gittest.Run(t, shared, "commit", "-q", "-am", "v2")
+	gittest.Run(t, shared, "tag", "v2")
 
 	app := gitRepoWithModule(t, root, "app-infra", "terraform/app")
-	if err := os.WriteFile(filepath.Join(app, "terraform/app/waf.tf"), []byte(`
+	gittest.WriteFile(t, filepath.Join(app, "terraform/app/waf.tf"), `
 module "waf" {
   source = "git::https://github.com/org/shared.git//modules/waf?ref=v1"
 }
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	git(t, app, "add", ".")
-	git(t, app, "commit", "-q", "-m", "pin")
+`)
+	gittest.CommitAll(t, app, "pin")
 	store := state.New(t.TempDir())
 	modPath := filepath.Join(app, "terraform/app")
 	if err := store.SaveWorkspaces(modPath, []string{"prod"}, time.Now()); err != nil {

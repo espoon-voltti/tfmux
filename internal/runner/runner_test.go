@@ -243,6 +243,9 @@ func TestPlanErrorClassifiesKnownSignatures(t *testing.T) {
 		if ev.Record.PlanErrorKind != want {
 			t.Errorf("stderr %q: PlanErrorKind = %q, want %q", stderr, ev.Record.PlanErrorKind, want)
 		}
+		if ev.Record.Fingerprint == "" {
+			t.Errorf("stderr %q: a failed plan must still record the fingerprint it was taken against", stderr)
+		}
 	}
 }
 
@@ -326,7 +329,8 @@ func TestPriorityPlanBeatsEnumerate(t *testing.T) {
 	waitFor(t, f.runner.Events, func(e Event) bool { return e.TaskID() == lowID && e.Phase.Terminal() })
 }
 
-// A task canceled while still queued emits Canceled and never runs.
+// A task canceled while still queued emits Canceled and never runs. Cancel
+// is scoped to one kind: the other task queued under the same key goes on.
 func TestCancelQueuedEmitsCanceled(t *testing.T) {
 	f := newFixture(t, 1)
 	t.Setenv("TFMUX_FAKE_SLEEP", "1")
@@ -337,20 +341,20 @@ func TestCancelQueuedEmitsCanceled(t *testing.T) {
 	waitFor(t, f.runner.Events, func(e Event) bool {
 		return e.Phase == PhaseRunning && e.Key == blocker.Path
 	})
-	ws := &domain.Workspace{Module: victim, Name: "prod"}
-	f.runner.EnqueuePlan(ws)
-	f.runner.Cancel(ws.Key())
+	f.runner.EnqueueEnumerate(victim)
+	f.runner.EnqueueInitUpgrade(victim)
+	f.runner.Cancel(KindEnumerate, victim.Path)
 
-	ev := waitFor(t, f.runner.Events, func(e Event) bool {
-		return e.Kind == KindPlan && e.Key == ws.Key()
-	})
-	if ev.Phase != PhaseCanceled {
-		t.Errorf("first plan event = %v, want Canceled (it should never have run)", ev.Phase)
+	ev := waitFor(t, f.runner.Events, func(e Event) bool { return e.Key == victim.Path })
+	if ev.Kind != KindEnumerate || ev.Phase != PhaseCanceled {
+		t.Errorf("first victim event = %v %v, want the enumerate canceled (it should never have run)", ev.Kind, ev.Phase)
 	}
-	// let the blocker finish before TempDir cleanup
-	waitFor(t, f.runner.Events, func(e Event) bool {
-		return e.Key == blocker.Path && e.Phase.Terminal()
-	})
+	ev = waitFor(t, f.runner.Events, func(e Event) bool { return e.Key == victim.Path && e.Phase.Terminal() })
+	// One slot: the init only ran once the blocker had finished, so nothing
+	// is left running past the test.
+	if ev.Kind != KindInit || ev.Phase != PhaseDone {
+		t.Errorf("init under the same key = %v %v, want done", ev.Kind, ev.Phase)
+	}
 }
 
 // A task on an uninitialized module must defer to a KindInit task and retry
@@ -621,7 +625,7 @@ func TestFailedInitCancelsQueuedTasksInModule(t *testing.T) {
 	otherPlan := &domain.Workspace{Module: other, Name: "prod"}
 	f.runner.EnqueuePlan(otherPlan)
 
-	phases := map[string]Phase{}
+	phases := map[string]Event{}
 	var initEv Event
 	timeout := time.After(30 * time.Second)
 	for len(phases) < 4 {
@@ -630,7 +634,7 @@ func TestFailedInitCancelsQueuedTasksInModule(t *testing.T) {
 			if !ev.Phase.Terminal() {
 				continue
 			}
-			phases[ev.TaskID()] = ev.Phase
+			phases[ev.TaskID()] = ev
 			if ev.Kind == KindInit {
 				initEv = ev
 			}
@@ -646,11 +650,11 @@ func TestFailedInitCancelsQueuedTasksInModule(t *testing.T) {
 		t.Errorf("CanceledDependents = %d, want 2", initEv.CanceledDependents)
 	}
 	for _, id := range []string{TaskID(KindPlan, m.Path+"//prod"), TaskID(KindOutput, m.Path+"//staging")} {
-		if phases[id] != PhaseCanceled {
-			t.Errorf("%s: phase = %v, want canceled", id, phases[id])
+		if phases[id].Phase != PhaseCanceled || !strings.Contains(phases[id].Err, "Failed to query") {
+			t.Errorf("%s: %v %q, want canceled with the init error", id, phases[id].Phase, phases[id].Err)
 		}
 	}
-	if p := phases[TaskID(KindPlan, otherPlan.Key())]; p != PhaseDone {
+	if p := phases[TaskID(KindPlan, otherPlan.Key())].Phase; p != PhaseDone {
 		t.Errorf("other module's plan: phase = %v, want done", p)
 	}
 	if f.runner.Running(m.Path + "//prod") {

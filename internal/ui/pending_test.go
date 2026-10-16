@@ -11,6 +11,7 @@ import (
 
 	"github.com/espoon-voltti/tfmux/internal/deps"
 	"github.com/espoon-voltti/tfmux/internal/domain"
+	"github.com/espoon-voltti/tfmux/internal/manifest"
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/tfexec"
@@ -113,5 +114,20 @@ func TestPendingOnlyWithNothingPending(t *testing.T) {
 	}
 	if v := m.View(); !strings.Contains(v, "nothing pending") {
 		t.Errorf("empty-tree hint missing:\n%s", v)
+	}
+}
+
+// A module hidden by its repo's manifest is not part of the tree, so it is
+// neither snapshotted nor counted, even with outdated pins.
+func TestPendingOnlySkipsManifestHiddenModules(t *testing.T) {
+	m, _, base := pendingFixture(t)
+	base.Repo.ManifestPath = "/iac/repo1/" + manifest.FileName
+	m.reflow()
+	if m.nModulesBehind != 0 {
+		t.Errorf("nModulesBehind = %d, want 0 for a manifest-hidden module", m.nModulesBehind)
+	}
+	keyPress(m, "!")
+	if m.pending[moduleRowID(base.Path)] || !strings.Contains(m.status, "0 module(s)") {
+		t.Errorf("pending snapshot included the hidden module: %v, status %q", m.pending, m.status)
 	}
 }

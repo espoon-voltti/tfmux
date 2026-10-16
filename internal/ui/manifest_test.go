@@ -114,10 +114,7 @@ func TestInitDoneSkipsEnumerateForManifestListed(t *testing.T) {
 	mod.ManifestListed = true
 	mod.ManifestWorkspaces = []string{"default"}
 
-	m.updateRunnerEvent(runner.Event{
-		Kind: runner.KindInit, Key: mod.Path, ModulePath: mod.Path,
-		Phase: runner.PhaseDone,
-	})
+	initDone(m, mod.Path)
 
 	if n := countTasks(m, runner.KindEnumerate); n != 0 {
 		t.Errorf("enumerate tasks = %d, want 0", n)

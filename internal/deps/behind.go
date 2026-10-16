@@ -19,8 +19,8 @@ import (
 type Behind struct {
 	Ref        string `json:"ref"`
 	RefMissing bool   `json:"ref_missing,omitempty"` // ref not present locally: not fetched, or a typo
-	NewerTag   string `json:"newer_tag,omitempty"`   // newest tag whose subdir tree differs from the ref's
-	Unreleased bool   `json:"unreleased,omitempty"`  // HEAD's subdir tree differs from the newest tag's (or the ref's, with no tags)
+	NewerTag   string `json:"newer_tag,omitempty"`   // newest tag whose subdir tree differs from the ref's and which the ref does not already contain
+	Unreleased bool   `json:"unreleased,omitempty"`  // HEAD's subdir tree differs from the newest of the ref and the newest tag
 	Dirty      bool   `json:"dirty,omitempty"`       // uncommitted changes under subdir
 }
 
@@ -50,6 +50,10 @@ func RefKey(g domain.GitRef) string { return g.Key() + "@" + g.Ref }
 // CheckRefs compares every pinned ref against the checkout at repoPath,
 // which must be the repository the refs name. Unpinned refs are skipped. The
 // result is keyed by RefKey.
+//
+// A ref that already contains the newest tag (a branch, or a commit after
+// the tag) is never reported as behind that tag: the pin floats on purpose
+// and bumping it to the tag would be a downgrade.
 func CheckRefs(ctx context.Context, repoPath string, refs []domain.GitRef) map[string]Behind {
 	out := map[string]Behind{}
 	newest, _ := gitstatus.NewestTag(ctx, repoPath)
@@ -69,17 +73,16 @@ func CheckRefs(ctx context.Context, repoPath string, refs []domain.GitRef) map[s
 		if !found {
 			b.RefMissing = true
 		}
-		headTree, _, _ := gitstatus.TreeID(ctx, repoPath, "HEAD", g.Subdir)
 		latest := refTree
-		if newest != "" && newest != g.Ref {
-			if tagTree, ok, _ := gitstatus.TreeID(ctx, repoPath, newest, g.Subdir); ok {
-				if found && tagTree != refTree {
-					b.NewerTag = newest
-				}
+		if found && newest != "" && newest != g.Ref {
+			tagTree, ok, _ := gitstatus.TreeID(ctx, repoPath, newest, g.Subdir)
+			contains, _ := gitstatus.IsAncestor(ctx, repoPath, newest, g.Ref)
+			if ok && tagTree != refTree && !contains {
+				b.NewerTag = newest
 				latest = tagTree
 			}
 		}
-		if found && headTree != latest {
+		if headTree, _, _ := gitstatus.TreeID(ctx, repoPath, "HEAD", g.Subdir); found && headTree != latest {
 			b.Unreleased = true
 		}
 		if dirty, _ := gitstatus.HasChanges(ctx, repoPath, []string{g.Subdir}); dirty {

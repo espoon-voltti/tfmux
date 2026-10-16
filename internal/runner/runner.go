@@ -149,11 +149,11 @@ type Event struct {
 	Token      string           // KindApply, PhaseRunning: the window's durable identity — see tmuxctl.WindowFor
 	ApplyExit  *int             // KindApply, PhaseDone (exit code; nil when aborted)
 	Aborted    bool             // KindApply, PhaseDone (window vanished, outcome unknown)
-	Err        string           // PhaseFailed
+	Err        string           // PhaseFailed; for PhaseCanceled, the failed init that dropped the task, when that is why
 
 	// CanceledDependents counts the module's queued tasks dropped because they
 	// were waiting on this failed init (KindInit, PhaseFailed). Each still
-	// gets its own PhaseCanceled event.
+	// gets its own PhaseCanceled event carrying this init's Err.
 	CanceledDependents int
 
 	// requeueFn, when set, means the task discovered it needs init instead of
@@ -338,7 +338,7 @@ func (r *Runner) execute(t *task) {
 	out.CanceledDependents = len(dependents)
 	r.emit(out)
 	for _, d := range dependents {
-		r.emit(Event{Kind: d.kind, Key: d.key, ModulePath: d.modulePath, Phase: PhaseCanceled})
+		r.emit(Event{Kind: d.kind, Key: d.key, ModulePath: d.modulePath, Phase: PhaseCanceled, Err: "terraform init failed:\n" + out.Err})
 	}
 }
 
@@ -430,15 +430,26 @@ func (r *Runner) enqueue(kind Kind, key, modulePath, wantWS string, job jobFunc)
 	return true
 }
 
-// Cancel stops every task with the given key. A queued task is dropped before
-// it runs (emitting Canceled); a running non-apply task receives SIGINT. A
-// running apply is left alone — its terraform lives in tmux, so canceling our
-// poll wouldn't stop it (killing it is a separate, explicit action).
-func (r *Runner) Cancel(key string) {
+// Cancel stops the task of one kind with the given key. A queued task is
+// dropped before it runs (emitting Canceled); a running non-apply task
+// receives SIGINT. A running apply is left alone — its terraform lives in
+// tmux, so canceling our poll wouldn't stop it (killing it is a separate,
+// explicit action).
+func (r *Runner) Cancel(kind Kind, key string) {
+	r.cancel(func(t *task) bool { return t.kind == kind && t.key == key })
+}
+
+// CancelKey stops every task with the given key, whatever its kind: a
+// workspace's plan and apply, or a module's enumerate and init.
+func (r *Runner) CancelKey(key string) {
+	r.cancel(func(t *task) bool { return t.key == key })
+}
+
+func (r *Runner) cancel(match func(*task) bool) {
 	var dropped []*task
 	r.mu.Lock()
 	for id, t := range r.inflight {
-		if t.key != key {
+		if !match(t) {
 			continue
 		}
 		if t.started {
@@ -864,6 +875,11 @@ func (r *Runner) plan(ctx context.Context, tf tfexec.TF, m *domain.Module, works
 		Workspace:   workspace,
 		PlanStarted: time.Now(),
 	}
+	// Taken before the plan runs, so an edit made while it runs already
+	// counts as a change against it.
+	if fp, err := gitstatus.Fingerprint(ctx, m.Repo.Path, m.FingerprintPaths()); err == nil {
+		rec.Fingerprint = fp
+	}
 
 	// Stream the plan's output to the log file as it runs, so the UI can
 	// follow it live. The file is truncated up front (so a stale log never
@@ -903,9 +919,6 @@ func (r *Runner) plan(ctx context.Context, tf tfexec.TF, m *domain.Module, works
 	if res.ExitCode != tfexec.PlanError {
 		if v, err := tf.Version(ctx); err == nil {
 			rec.TFBinVersion = v
-		}
-		if fp, err := gitstatus.Fingerprint(ctx, m.Repo.Path, m.FingerprintPaths()); err == nil {
-			rec.Fingerprint = fp
 		}
 	}
 	// A clean or failed plan leaves no plan file worth applying.

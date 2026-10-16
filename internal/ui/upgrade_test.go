@@ -5,11 +5,12 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/espoon-voltti/tfmux/internal/deps"
 	"github.com/espoon-voltti/tfmux/internal/domain"
@@ -42,18 +43,30 @@ func outdatedPinFixture(t *testing.T) (*Model, *domain.Module, string) {
 	return m, mod, mainTF
 }
 
-func drainInitFinished(t *testing.T, m *Model) {
-	t.Helper()
-	timeout := time.After(15 * time.Second)
-	for {
-		select {
-		case ev := <-m.runner.Events:
-			if ev.Kind == runner.KindInit && ev.Phase.Terminal() {
-				return
+// I on a repo row queues init -upgrade for every module in the repo, or
+// under a filter only for the modules left visible.
+func TestInitUpgradeRepoQueuesVisibleModules(t *testing.T) {
+	for _, c := range []struct {
+		filter string
+		want   []string
+	}{{"", []string{"a", "b"}}, {"b", []string{"b"}}} {
+		t.Run("filter "+c.filter, func(t *testing.T) {
+			m := twoRepoModel(t)
+			m.filterText = c.filter
+			m.reflow()
+			m.cursor = 0 // repo1 row
+			m.initUpgradeCurrent()
+			for _, mod := range m.repos[0].Modules {
+				want := slices.Contains(c.want, mod.RelPath)
+				if m.hasTask(runner.KindInit, mod.Path) != want {
+					t.Errorf("init -upgrade queued for %s = %v, want %v", mod.RelPath, !want, want)
+				}
 			}
-		case <-timeout:
-			t.Fatal("timed out draining init events")
-		}
+			if !strings.Contains(m.status, fmt.Sprintf("%d module", len(c.want))) {
+				t.Errorf("status = %q", m.status)
+			}
+			drain(t, m, runner.KindInit, len(c.want))
+		})
 	}
 }
 
@@ -96,7 +109,7 @@ func TestInitUpgradeOffersToBumpOutdatedPins(t *testing.T) {
 	if !strings.Contains(m.status, "updated 1 module reference(s)") || !strings.Contains(m.status, "init -upgrade queued") {
 		t.Errorf("status = %q", m.status)
 	}
-	drainInitFinished(t, m)
+	drain(t, m, runner.KindInit, 1)
 }
 
 func TestInitUpgradeDeclinedKeepsPins(t *testing.T) {
@@ -112,7 +125,7 @@ func TestInitUpgradeDeclinedKeepsPins(t *testing.T) {
 	if got, _ := os.ReadFile(mainTF); !strings.Contains(string(got), "?ref=v16\"") {
 		t.Errorf("main.tf must be untouched:\n%s", got)
 	}
-	drainInitFinished(t, m)
+	drain(t, m, runner.KindInit, 1)
 }
 
 func TestInitUpgradeWithoutOutdatedPinsQueuesDirectly(t *testing.T) {
@@ -125,5 +138,5 @@ func TestInitUpgradeWithoutOutdatedPinsQueuesDirectly(t *testing.T) {
 	if !m.hasTask(runner.KindInit, mod.Path) {
 		t.Error("init -upgrade should be queued")
 	}
-	drainInitFinished(t, m)
+	drain(t, m, runner.KindInit, 1)
 }

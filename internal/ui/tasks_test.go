@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/tmuxctl"
@@ -314,13 +315,21 @@ func TestTaskPaneSortsRunningFirst(t *testing.T) {
 	}
 }
 
-func TestFinishedTaskStaysInPane(t *testing.T) {
-	m, mod := fixtureModel(t)
+// finishedPlan runs a plan task for prod through running to the given
+// terminal phase and returns its key.
+func finishedPlan(t *testing.T, m *Model, mod *domain.Module, phase runner.Phase) string {
+	t.Helper()
 	enumerated(t, m, mod, "prod")
 	key := mod.Path + "//prod"
 	m.addTask(runner.KindPlan, key)
 	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseRunning})
-	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseFailed, Err: "boom"})
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: phase, Err: "boom"})
+	return key
+}
+
+func TestFinishedTaskStaysInPane(t *testing.T) {
+	m, mod := fixtureModel(t)
+	key := finishedPlan(t, m, mod, runner.PhaseFailed)
 
 	if m.hasTask(runner.KindPlan, key) {
 		t.Fatal("a finished task must not count as in flight")
@@ -352,11 +361,7 @@ func TestQueuedCancelNotKeptAsFinished(t *testing.T) {
 // finished one.
 func TestRerunHidesPreviousFinishedRow(t *testing.T) {
 	m, mod := fixtureModel(t)
-	enumerated(t, m, mod, "prod")
-	key := mod.Path + "//prod"
-	m.addTask(runner.KindPlan, key)
-	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseRunning})
-	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseDone})
+	key := finishedPlan(t, m, mod, runner.PhaseDone)
 	m.addTask(runner.KindPlan, key)
 
 	if n := len(m.sortedTasks()); n != 1 {
@@ -366,11 +371,7 @@ func TestRerunHidesPreviousFinishedRow(t *testing.T) {
 
 func TestViewFinishedTaskLogReturnsToPane(t *testing.T) {
 	m, mod := fixtureModel(t)
-	enumerated(t, m, mod, "prod")
-	key := mod.Path + "//prod"
-	m.addTask(runner.KindPlan, key)
-	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseRunning})
-	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseDone})
+	key := finishedPlan(t, m, mod, runner.PhaseDone)
 
 	keyPress(m, "T")
 	cmd := keyPress(m, "enter")
@@ -392,11 +393,7 @@ func TestViewFinishedTaskLogReturnsToPane(t *testing.T) {
 
 func TestCancelOnFinishedTaskIsNoop(t *testing.T) {
 	m, mod := fixtureModel(t)
-	enumerated(t, m, mod, "prod")
-	key := mod.Path + "//prod"
-	m.addTask(runner.KindPlan, key)
-	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseRunning})
-	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseDone})
+	finishedPlan(t, m, mod, runner.PhaseDone)
 
 	keyPress(m, "T")
 	keyPress(m, "x")

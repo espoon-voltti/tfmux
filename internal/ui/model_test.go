@@ -106,19 +106,19 @@ func TestEnumErrorShownOnModule(t *testing.T) {
 	}
 }
 
-// drainPlanFinished waits until n queued plan jobs completed, so async
+// drain waits until n tasks of kind reached a terminal event, so async
 // runner goroutines stop touching the store before t.TempDir() cleanup.
-func drainPlanFinished(t *testing.T, m *Model, n int) {
+func drain(t *testing.T, m *Model, kind runner.Kind, n int) {
 	t.Helper()
 	timeout := time.After(15 * time.Second)
 	for n > 0 {
 		select {
 		case ev := <-m.runner.Events:
-			if ev.Kind == runner.KindPlan && ev.Phase.Terminal() {
+			if ev.Kind == kind && ev.Phase.Terminal() {
 				n--
 			}
 		case <-timeout:
-			t.Fatal("timed out draining plan events")
+			t.Fatalf("timed out draining %s events", kind)
 		}
 	}
 }
@@ -132,7 +132,7 @@ func TestPlanKeyQueuesCursorWorkspace(t *testing.T) {
 	if !m.hasTask(runner.KindPlan, key) {
 		t.Error("plan not queued for cursor workspace")
 	}
-	drainPlanFinished(t, m, 1)
+	drain(t, m, runner.KindPlan, 1)
 }
 
 func TestPlanKeyOnRepoQueuesAllWorkspaces(t *testing.T) {
@@ -143,24 +143,7 @@ func TestPlanKeyOnRepoQueuesAllWorkspaces(t *testing.T) {
 	if n := countTasks(m, runner.KindPlan); n != 2 {
 		t.Errorf("plan tasks = %d, want 2", n)
 	}
-	drainPlanFinished(t, m, 2)
-}
-
-// drainOutputFinished waits until n queued output jobs completed, so async
-// runner goroutines stop touching the store before t.TempDir() cleanup.
-func drainOutputFinished(t *testing.T, m *Model, n int) {
-	t.Helper()
-	timeout := time.After(15 * time.Second)
-	for n > 0 {
-		select {
-		case ev := <-m.runner.Events:
-			if ev.Kind == runner.KindOutput && ev.Phase.Terminal() {
-				n--
-			}
-		case <-timeout:
-			t.Fatal("timed out draining output events")
-		}
-	}
+	drain(t, m, runner.KindPlan, 2)
 }
 
 func TestOutputKeyQueuesCursorWorkspace(t *testing.T) {
@@ -172,7 +155,7 @@ func TestOutputKeyQueuesCursorWorkspace(t *testing.T) {
 	if !m.hasTask(runner.KindOutput, key) {
 		t.Error("output not queued for cursor workspace")
 	}
-	drainOutputFinished(t, m, 1)
+	drain(t, m, runner.KindOutput, 1)
 }
 
 func TestOutputKeyIgnoredOnNonWorkspaceRow(t *testing.T) {
@@ -405,7 +388,7 @@ func TestMassApplyConfirmsThenSkipsIneligible(t *testing.T) {
 	enumerated(t, m, mod, "default", "prod", "staging")
 	changedPlan(m, mod, "prod")
 	changedPlan(m, mod, "staging")
-	// "default" has no plan with changes — it must be excluded.
+	// "default" has no plan with changes: it must be excluded.
 
 	m.cursor = 1 // module row
 	keyPress(m, "A")
@@ -415,23 +398,10 @@ func TestMassApplyConfirmsThenSkipsIneligible(t *testing.T) {
 	if !strings.Contains(m.View(), "apply 2 plan(s) with changes") {
 		t.Errorf("confirmation prompt missing from view")
 	}
-	// Confirmation gates the launch: no apply task yet.
 	if countTasks(m, runner.KindApply) != 0 {
 		t.Error("mass apply should not enqueue before confirmation")
 	}
-}
 
-func TestMassApplyCanceledLeavesNothingQueued(t *testing.T) {
-	m, mod := fixtureModel(t)
-	enumerated(t, m, mod, "prod", "staging")
-	changedPlan(m, mod, "prod")
-	changedPlan(m, mod, "staging")
-
-	m.cursor = 0 // repo row
-	keyPress(m, "A")
-	if len(m.confirmApply) != 2 {
-		t.Fatalf("confirmApply targets = %d, want 2", len(m.confirmApply))
-	}
 	keyPress(m, "n")
 	if len(m.confirmApply) != 0 {
 		t.Error("n should clear the pending mass apply")
@@ -650,42 +620,37 @@ func setFilter(m *Model, text string) {
 	keyPress(m, "enter")
 }
 
-func TestPlanKeyOnModuleQueuesOnlyFilteredWorkspaces(t *testing.T) {
-	m, mod := fixtureModel(t)
-	enumerated(t, m, mod, "default", "blue", "green")
-	setFilter(m, "blue")
-	m.cursor = 1 // module row
-	keyPress(m, "p")
-	if n := countTasks(m, runner.KindPlan); n != 1 || !m.hasTask(runner.KindPlan, mod.Path+"//blue") {
-		t.Errorf("plan tasks = %d, want only blue: %v", n, m.tasks)
+// p on a module or repo row plans only the workspaces the filter leaves
+// visible; a filter matching the module itself keeps all of its workspaces.
+func TestPlanKeyHonorsFilter(t *testing.T) {
+	cases := []struct {
+		name   string
+		filter string
+		cursor int
+		want   []string
+	}{
+		{"module row, workspace filter", "blue", 1, []string{"blue"}},
+		{"repo row, workspace filter", "gre", 0, []string{"green"}},
+		{"module row, module filter", "envs/", 1, []string{"default", "blue", "green"}},
 	}
-	drainPlanFinished(t, m, 1)
-}
-
-func TestPlanKeyOnRepoQueuesOnlyFilteredWorkspaces(t *testing.T) {
-	m, mod := fixtureModel(t)
-	enumerated(t, m, mod, "default", "blue", "green")
-	setFilter(m, "gre")
-	m.cursor = 0 // repo row
-	keyPress(m, "p")
-	if n := countTasks(m, runner.KindPlan); n != 1 || !m.hasTask(runner.KindPlan, mod.Path+"//green") {
-		t.Errorf("plan tasks = %d, want only green: %v", n, m.tasks)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m, mod := fixtureModel(t)
+			enumerated(t, m, mod, "default", "blue", "green")
+			setFilter(m, c.filter)
+			m.cursor = c.cursor
+			keyPress(m, "p")
+			if n := countTasks(m, runner.KindPlan); n != len(c.want) {
+				t.Errorf("plan tasks = %d, want %d: %v", n, len(c.want), m.tasks)
+			}
+			for _, ws := range c.want {
+				if !m.hasTask(runner.KindPlan, mod.Path+"//"+ws) {
+					t.Errorf("plan for %s not queued", ws)
+				}
+			}
+			drain(t, m, runner.KindPlan, len(c.want))
+		})
 	}
-	drainPlanFinished(t, m, 1)
-}
-
-// A filter matching the module path keeps all of its workspaces visible, so
-// all of them are targeted.
-func TestPlanKeyFilterMatchingModuleQueuesAllItsWorkspaces(t *testing.T) {
-	m, mod := fixtureModel(t)
-	enumerated(t, m, mod, "default", "prod")
-	setFilter(m, "envs/")
-	m.cursor = 1 // module row
-	keyPress(m, "p")
-	if n := countTasks(m, runner.KindPlan); n != 2 {
-		t.Errorf("plan tasks = %d, want 2", n)
-	}
-	drainPlanFinished(t, m, 2)
 }
 
 func TestMassApplyOnlyTargetsFilteredWorkspaces(t *testing.T) {
@@ -729,22 +694,6 @@ func TestCleanPlanNeedsPlanAfterChange(t *testing.T) {
 	}
 }
 
-func TestLegacyRecordNeedsPlan(t *testing.T) {
-	m, mod := fixtureModel(t)
-	enumerated(t, m, mod, "prod")
-	key := mod.Path + "//prod"
-	m.runs[key] = &state.RunRecord{
-		ModulePath: mod.Path, Workspace: "prod",
-		PlanFinished: time.Now(), PlanExitCode: tfexec.PlanChanges,
-	}
-	m.planFiles[key] = true
-	m.fingerprints[mod.Path] = "aaa|bbb"
-	m.reflow()
-	if !strings.Contains(m.View(), "STALE") {
-		t.Error("a record without a fingerprint must not be applyable")
-	}
-}
-
 func TestModuleBehindBadgeAndRefreshJoin(t *testing.T) {
 	m, mod := fixtureModel(t)
 	mod.Deps = &domain.Deps{Git: []domain.GitRef{{Repo: "github.com/org/shared", Subdir: "modules/waf", Ref: "v16", Via: "waf"}}}
@@ -781,19 +730,16 @@ func TestModuleBehindBadgeAndRefreshJoin(t *testing.T) {
 	}
 }
 
-// stateFixture wires base (holding a backend) and service (reading it in
-// three ways) into m, with run records for service's prod and staging.
-func stateFixture(t *testing.T, m *Model, base *domain.Module, unknownMapping bool) (service *domain.Module) {
+// stateFixture wires base (holding a backend) and service (reading it in the
+// same workspace) into m, with clean run records for service's prod and
+// staging.
+func stateFixture(t *testing.T, m *Model, base *domain.Module) (service *domain.Module) {
 	t.Helper()
 	addr := domain.StateAddress{Backend: "s3", Bucket: "tf", Key: "base.tfstate"}
 	base.Deps = &domain.Deps{Backend: &addr}
 	enumerated(t, m, base, "prod", "staging")
 	service = &domain.Module{Repo: base.Repo, Path: "/iac/repo1/envs/service", RelPath: "envs/service", TFBin: "terraform"}
-	kind, expr := domain.WorkspaceSame, ""
-	if unknownMapping {
-		kind, expr = domain.WorkspaceUnknown, "local.x"
-	}
-	service.Deps = &domain.Deps{RemoteStates: []domain.RemoteStateRef{{Name: "base", StateAddress: addr, WorkspaceKind: kind, WorkspaceExpr: expr}}}
+	service.Deps = &domain.Deps{RemoteStates: []domain.RemoteStateRef{{Name: "base", StateAddress: addr, WorkspaceKind: domain.WorkspaceSame}}}
 	base.Repo.Modules = append(base.Repo.Modules, service)
 	enumerated(t, m, service, "prod", "staging")
 	for _, ws := range []string{"prod", "staging"} {
@@ -805,17 +751,18 @@ func stateFixture(t *testing.T, m *Model, base *domain.Module, unknownMapping bo
 	return service
 }
 
-func applied(m *Model, mod *domain.Module, ws string, outputsChanged bool) {
+// applied finishes an apply of ws whose plan changed outputs.
+func applied(m *Model, mod *domain.Module, ws string) {
 	key := mod.Path + "//" + ws
-	m.runs[key] = &state.RunRecord{ModulePath: mod.Path, Workspace: ws, PlanExitCode: tfexec.PlanChanges, OutputsChanged: outputsChanged, Apply: &state.ApplyRecord{Started: time.Now()}}
+	m.runs[key] = &state.RunRecord{ModulePath: mod.Path, Workspace: ws, PlanExitCode: tfexec.PlanChanges, OutputsChanged: true, Apply: &state.ApplyRecord{Started: time.Now()}}
 	exit := 0
 	m.updateRunnerEvent(runner.Event{Kind: runner.KindApply, Key: key, ModulePath: mod.Path, Phase: runner.PhaseDone, ApplyExit: &exit})
 }
 
 func TestUpstreamApplyInvalidatesMappedDownstream(t *testing.T) {
 	m, base := fixtureModel(t)
-	service := stateFixture(t, m, base, false)
-	applied(m, base, "prod", true)
+	service := stateFixture(t, m, base)
+	applied(m, base, "prod")
 	if m.runs[service.Path+"//prod"].Invalidated == nil {
 		t.Error("service//prod reads base//prod and should be invalidated")
 	}
@@ -833,32 +780,9 @@ func TestUpstreamApplyInvalidatesMappedDownstream(t *testing.T) {
 	}
 	// Re-applying does not stack a second invalidation.
 	first := m.runs[service.Path+"//prod"].Invalidated
-	applied(m, base, "prod", true)
+	applied(m, base, "prod")
 	if m.runs[service.Path+"//prod"].Invalidated != first {
 		t.Error("an already-invalidated record must not be re-marked")
-	}
-}
-
-func TestUpstreamApplyUnknownMappingInvalidatesAll(t *testing.T) {
-	m, base := fixtureModel(t)
-	service := stateFixture(t, m, base, true)
-	applied(m, base, "prod", true)
-	for _, ws := range []string{"prod", "staging"} {
-		if m.runs[service.Path+"//"+ws].Invalidated == nil {
-			t.Errorf("service//%s: unresolvable mapping should invalidate every workspace", ws)
-		}
-	}
-}
-
-func TestUpstreamApplyWithoutOutputChangesIsQuiet(t *testing.T) {
-	m, base := fixtureModel(t)
-	service := stateFixture(t, m, base, false)
-	applied(m, base, "prod", false)
-	if m.runs[service.Path+"//prod"].Invalidated != nil {
-		t.Error("no output changed: downstream must not be marked")
-	}
-	if strings.Contains(m.status, "downstream") {
-		t.Errorf("status = %q", m.status)
 	}
 }
 
@@ -873,30 +797,5 @@ func TestInvalidatedPlanIsNotApplyable(t *testing.T) {
 	keyPress(m, "A")
 	if !strings.Contains(m.status, "STALE") {
 		t.Errorf("status = %q", m.status)
-	}
-}
-
-func TestStateCycleTerminates(t *testing.T) {
-	m, a := fixtureModel(t)
-	addrA := domain.StateAddress{Backend: "s3", Bucket: "tf", Key: "a.tfstate"}
-	addrB := domain.StateAddress{Backend: "s3", Bucket: "tf", Key: "b.tfstate"}
-	b := &domain.Module{Repo: a.Repo, Path: "/iac/repo1/envs/b", RelPath: "envs/b", TFBin: "terraform"}
-	a.Deps = &domain.Deps{Backend: &addrA, RemoteStates: []domain.RemoteStateRef{{Name: "b", StateAddress: addrB, WorkspaceKind: domain.WorkspaceSame}}}
-	b.Deps = &domain.Deps{Backend: &addrB, RemoteStates: []domain.RemoteStateRef{{Name: "a", StateAddress: addrA, WorkspaceKind: domain.WorkspaceSame}}}
-	a.Repo.Modules = append(a.Repo.Modules, b)
-	enumerated(t, m, a, "prod")
-	enumerated(t, m, b, "prod")
-	for _, mod := range []*domain.Module{a, b} {
-		m.runs[mod.Path+"//prod"] = &state.RunRecord{ModulePath: mod.Path, Workspace: "prod", PlanExitCode: tfexec.PlanClean, Fingerprint: "f"}
-	}
-	m.reflow()
-	applied(m, a, "prod", true)
-	if m.runs[b.Path+"//prod"].Invalidated == nil {
-		t.Error("b reads a and should be marked")
-	}
-	// a's own record was replaced by the apply fixture; it must not have been
-	// marked by its own apply through b.
-	if m.runs[a.Path+"//prod"].Invalidated != nil {
-		t.Error("propagation must stop after one hop")
 	}
 }

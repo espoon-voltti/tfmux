@@ -6,70 +6,47 @@ package gitstatus
 
 import (
 	"context"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/espoon-voltti/tfmux/internal/domain"
+	"github.com/espoon-voltti/tfmux/internal/gittest"
 )
 
-func TestParseCleanWithUpstream(t *testing.T) {
-	out := `# branch.oid 1234567890abcdef
-# branch.head main
-# branch.upstream origin/main
-# branch.ab +2 -1
-`
-	st := Parse(out)
-	if st.Branch != "main" || st.Dirty || st.Ahead != 2 || st.Behind != 1 || !st.HasUpstream {
-		t.Errorf("unexpected: %+v", st)
+func TestParse(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want func(t *testing.T, st domain.GitStatus)
+	}{
+		{"clean with upstream", "# branch.oid 1234567890abcdef\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +2 -1\n",
+			func(t *testing.T, st domain.GitStatus) {
+				if st.Branch != "main" || st.Dirty || st.Ahead != 2 || st.Behind != 1 || !st.HasUpstream {
+					t.Errorf("unexpected: %+v", st)
+				}
+			}},
+		{"dirty detached", "# branch.oid deadbeef\n# branch.head (detached)\n1 .M N... 100644 100644 100644 abc def main.tf\n? untracked.tf\n",
+			func(t *testing.T, st domain.GitStatus) {
+				if !st.Detached || st.Branch != "" || !st.Dirty {
+					t.Errorf("unexpected: %+v", st)
+				}
+			}},
+		{"initial, no upstream", "# branch.oid (initial)\n# branch.head main\n",
+			func(t *testing.T, st domain.GitStatus) {
+				if st.Branch != "main" || st.HasUpstream || st.Dirty || st.OID != "(initial)" {
+					t.Errorf("unexpected: %+v", st)
+				}
+			}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) { c.want(t, Parse(c.out)) })
 	}
 }
 
-func TestParseDirtyDetached(t *testing.T) {
-	out := `# branch.oid deadbeef
-# branch.head (detached)
-1 .M N... 100644 100644 100644 abc def main.tf
-? untracked.tf
-`
-	st := Parse(out)
-	if !st.Detached || st.Branch != "" || !st.Dirty {
-		t.Errorf("unexpected: %+v", st)
-	}
-}
-
-func TestParseInitialNoUpstream(t *testing.T) {
-	out := `# branch.oid (initial)
-# branch.head main
-`
-	st := Parse(out)
-	if st.Branch != "main" || st.HasUpstream || st.Dirty || st.OID != "(initial)" {
-		t.Errorf("unexpected: %+v", st)
-	}
-}
-
-// TestCLIAgainstRealRepo builds a throwaway repo and reads its status.
 func TestCLIAgainstRealRepo(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-	dir := t.TempDir()
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
-			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
-			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
-		)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-b", "main")
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("add", "a.txt")
-	run("commit", "-m", "init")
+	dir := gittest.Init(t)
+	gittest.WriteFile(t, filepath.Join(dir, "a.txt"), "x")
+	gittest.CommitAll(t, dir, "init")
 
 	st := CLI{}.Status(context.Background(), dir)
 	if st.Err != nil {
@@ -79,9 +56,7 @@ func TestCLIAgainstRealRepo(t *testing.T) {
 		t.Errorf("clean repo: %+v", st)
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("y"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	gittest.WriteFile(t, filepath.Join(dir, "b.txt"), "y")
 	st = CLI{}.Status(context.Background(), dir)
 	if !st.Dirty {
 		t.Errorf("expected dirty after untracked file: %+v", st)

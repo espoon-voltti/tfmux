@@ -161,8 +161,8 @@ func (m *Model) cancelSelectedTask() {
 		m.confirmKill = runner.TaskID(ts.kind, ts.key)
 		return
 	}
-	m.runner.Cancel(ts.key)
-	m.forgetTasks(ts.key)
+	m.runner.Cancel(ts.kind, ts.key)
+	m.forgetTask(ts.kind, ts.key)
 	m.clampTaskCursor()
 }
 
@@ -193,7 +193,7 @@ func (m *Model) cancelQueuedTasks() {
 		if ts.running {
 			continue
 		}
-		m.runner.Cancel(ts.key)
+		m.runner.Cancel(ts.kind, ts.key)
 		delete(m.tasks, id)
 		n++
 	}

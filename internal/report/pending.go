@@ -40,6 +40,9 @@ func Pending(store *state.Store, ignore state.Ignore, repos []*domain.Repo, need
 	var wg sync.WaitGroup
 	ctx := context.Background()
 	visible := VisibleRepos(ignore, repos)
+	// Module rows are collected apart from the workspace goroutines, which
+	// append to rows under mu.
+	var moduleRows []PendingRow
 	var behind map[string]deps.Behind
 	if !needsPlanOnly {
 		behind = CheckPins(ctx, visible, deps.Build(visible))
@@ -47,7 +50,7 @@ func Pending(store *state.Store, ignore state.Ignore, repos []*domain.Repo, need
 	for _, repo := range visible {
 		for _, mod := range repo.Modules {
 			for _, r := range attention.Module(mod.Deps, behind) {
-				rows = append(rows, PendingRow{Repo: repo.Name, Module: mod.RelPath, Reasons: []attention.Reason{r}})
+				moduleRows = append(moduleRows, PendingRow{Repo: repo.Name, Module: mod.RelPath, Reasons: []attention.Reason{r}})
 			}
 			var workspaces []string
 			if mod.ManifestListed {
@@ -86,6 +89,7 @@ func Pending(store *state.Store, ignore state.Ignore, repos []*domain.Repo, need
 		}
 	}
 	wg.Wait()
+	rows = append(rows, moduleRows...)
 	sort.Slice(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
 		if a.Repo != b.Repo {
@@ -127,10 +131,10 @@ func Ago(d time.Duration) string {
 	case d < time.Minute:
 		return "just now"
 	case d < time.Hour:
-		return fmt.Sprintf("%dm Ago", int(d.Minutes()))
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
 	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh Ago", int(d.Hours()))
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	default:
-		return fmt.Sprintf("%dd Ago", int(d.Hours()/24))
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }

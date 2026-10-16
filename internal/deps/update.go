@@ -38,11 +38,22 @@ func NewerTags(d *domain.Deps, behind map[string]Behind) map[string]string {
 	return out
 }
 
-// RewriteSources replaces quoted module source strings in the .tf files
-// directly under each dir, per replace (old source → new source), and
-// reports how many occurrences and files changed. Files are rewritten in
-// place with their original permissions.
+// sourceAttr matches a `source = "<old>"` attribute line, keeping everything
+// before the opening quote in group 1 so the replacement preserves it.
+func sourceAttr(old string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^([ \t]*source[ \t]*=[ \t]*)"` + regexp.QuoteMeta(old) + `"`)
+}
+
+// RewriteSources replaces `source = "old"` module attributes in the .tf
+// files directly under each dir, per replace (old source → new source), and
+// reports how many attributes and files changed. Only source attributes are
+// touched, so the same URL in a variable default or a comment stays. Files
+// are rewritten in place with their original permissions.
 func RewriteSources(dirs []string, replace map[string]string) (refs, files int, err error) {
+	patterns := make(map[*regexp.Regexp]string, len(replace))
+	for old, updated := range replace {
+		patterns[sourceAttr(old)] = `${1}"` + updated + `"`
+	}
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -59,13 +70,12 @@ func RewriteSources(dirs []string, replace map[string]string) (refs, files int, 
 			}
 			text := string(src)
 			n := 0
-			for old, new := range replace {
-				quoted := `"` + old + `"`
-				c := strings.Count(text, quoted)
+			for re, repl := range patterns {
+				c := len(re.FindAllStringIndex(text, -1))
 				if c == 0 {
 					continue
 				}
-				text = strings.ReplaceAll(text, quoted, `"`+new+`"`)
+				text = re.ReplaceAllString(text, repl)
 				n += c
 			}
 			if n == 0 {

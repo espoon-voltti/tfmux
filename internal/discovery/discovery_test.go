@@ -148,9 +148,29 @@ func TestDiscoverRootIsRepo(t *testing.T) {
 	}
 }
 
-func writeManifest(t *testing.T, repoPath, content string) {
+// discoverWithManifest builds one repo holding the given module dirs (name
+// -> main.tf content; "" leaves the dir empty) and manifest, discovers it,
+// and returns the repo.
+func discoverWithManifest(t *testing.T, manifest string, modules map[string]string) *domain.Repo {
 	t.Helper()
-	write(t, repoPath, ".terraform-workspaces.json", content)
+	root := t.TempDir()
+	repo := mkdir(t, root, "repo1")
+	mkdir(t, repo, ".git")
+	for name, content := range modules {
+		dir := mkdir(t, repo, name)
+		if content != "" {
+			write(t, dir, "main.tf", content)
+		}
+	}
+	write(t, repo, ".terraform-workspaces.json", manifest)
+	repos, err := Discover([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("repos = %+v", repos)
+	}
+	return repos[0]
 }
 
 func findModule(repo *domain.Repo, relPath string) *domain.Module {
@@ -163,18 +183,7 @@ func findModule(repo *domain.Repo, relPath string) *domain.Module {
 }
 
 func TestScanRepoManifestListedModuleAnnotated(t *testing.T) {
-	root := t.TempDir()
-	repo := mkdir(t, root, "repo1")
-	mkdir(t, repo, ".git")
-	base := mkdir(t, repo, "base")
-	write(t, base, "main.tf", backendModule)
-	writeManifest(t, repo, `[{"root_module": "base", "workspaces": ["staging", "prod"]}]`)
-
-	repos, err := Discover([]string{root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := repos[0]
+	r := discoverWithManifest(t, `[{"root_module": "base", "workspaces": ["staging", "prod"]}]`, map[string]string{"base": backendModule})
 	if !r.HasManifest() {
 		t.Fatal("HasManifest() = false")
 	}
@@ -188,20 +197,7 @@ func TestScanRepoManifestListedModuleAnnotated(t *testing.T) {
 }
 
 func TestScanRepoUnlistedModuleHidden(t *testing.T) {
-	root := t.TempDir()
-	repo := mkdir(t, root, "repo1")
-	mkdir(t, repo, ".git")
-	base := mkdir(t, repo, "base")
-	write(t, base, "main.tf", backendModule)
-	extra := mkdir(t, repo, "extra")
-	write(t, extra, "main.tf", backendModule)
-	writeManifest(t, repo, `[{"root_module": "base", "workspaces": ["default"]}]`)
-
-	repos, err := Discover([]string{root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := repos[0]
+	r := discoverWithManifest(t, `[{"root_module": "base", "workspaces": ["default"]}]`, map[string]string{"base": backendModule, "extra": backendModule})
 	extraMod := findModule(r, "extra")
 	if extraMod == nil {
 		t.Fatal("extra module not discovered")
@@ -216,18 +212,9 @@ func TestScanRepoUnlistedModuleHidden(t *testing.T) {
 }
 
 func TestScanRepoManifestOnlyModuleAppended(t *testing.T) {
-	root := t.TempDir()
-	repo := mkdir(t, root, "repo1")
-	mkdir(t, repo, ".git")
 	// "base" exists on disk but has no .tf files marking it a root module.
-	mkdir(t, repo, "base")
-	writeManifest(t, repo, `[{"root_module": "base", "workspaces": ["default"]}]`)
-
-	repos, err := Discover([]string{root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mod := findModule(repos[0], "base")
+	r := discoverWithManifest(t, `[{"root_module": "base", "workspaces": ["default"]}]`, map[string]string{"base": ""})
+	mod := findModule(r, "base")
 	if mod == nil {
 		t.Fatal("manifest-only module not appended")
 	}
@@ -237,34 +224,14 @@ func TestScanRepoManifestOnlyModuleAppended(t *testing.T) {
 }
 
 func TestScanRepoManifestMissingDir(t *testing.T) {
-	root := t.TempDir()
-	repo := mkdir(t, root, "repo1")
-	mkdir(t, repo, ".git")
-	writeManifest(t, repo, `[{"root_module": "gone", "workspaces": ["default"]}]`)
-
-	repos, err := Discover([]string{root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := repos[0]
+	r := discoverWithManifest(t, `[{"root_module": "gone", "workspaces": ["default"]}]`, nil)
 	if len(r.ManifestMissing) != 1 || r.ManifestMissing[0] != "gone" {
 		t.Errorf("ManifestMissing = %v", r.ManifestMissing)
 	}
 }
 
 func TestScanRepoManifestErrDoesNotBreakDiscovery(t *testing.T) {
-	root := t.TempDir()
-	repo := mkdir(t, root, "repo1")
-	mkdir(t, repo, ".git")
-	base := mkdir(t, repo, "base")
-	write(t, base, "main.tf", backendModule)
-	writeManifest(t, repo, `not valid json`)
-
-	repos, err := Discover([]string{root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := repos[0]
+	r := discoverWithManifest(t, `not valid json`, map[string]string{"base": backendModule})
 	if r.ManifestErr == "" {
 		t.Error("expected ManifestErr to be set")
 	}
@@ -277,31 +244,19 @@ func TestScanRepoManifestErrDoesNotBreakDiscovery(t *testing.T) {
 }
 
 func TestScanRepoManifestTemplatesAnnotated(t *testing.T) {
-	root := t.TempDir()
-	repo := mkdir(t, root, "repo1")
-	mkdir(t, repo, ".git")
-	base := mkdir(t, repo, "base")
-	write(t, base, "main.tf", backendModule)
-	shared := mkdir(t, repo, "shared")
-	write(t, shared, "main.tf", backendModule)
-	writeManifest(t, repo, `[
+	r := discoverWithManifest(t, `[
 	  {"root_module": "base", "workspaces": ["staging", "prod"],
 	   "init": "terraform init -backend-config=$TFMUX_WORKSPACE.hcl"},
 	  {"root_module": "shared", "workspaces": ["default"], "output": "  "}
-	]`)
-
-	repos, err := Discover([]string{root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	baseMod := findModule(repos[0], "base")
+	]`, map[string]string{"base": backendModule, "shared": backendModule})
+	baseMod := findModule(r, "base")
 	if !baseMod.Templated() || !baseMod.WorkspaceDependentInit() {
 		t.Errorf("base: Templates = %+v", baseMod.Templates)
 	}
 	if baseMod.Templates.Plan != "" {
 		t.Errorf("base: Plan template = %q, want empty", baseMod.Templates.Plan)
 	}
-	sharedMod := findModule(repos[0], "shared")
+	sharedMod := findModule(r, "shared")
 	if sharedMod.Templated() {
 		t.Errorf("shared: Templates = %+v, want nil", sharedMod.Templates)
 	}

@@ -18,65 +18,6 @@ import (
 	"github.com/espoon-voltti/tfmux/internal/state"
 )
 
-func drainInit(t *testing.T, m *Model, n int) {
-	t.Helper()
-	timeout := time.After(15 * time.Second)
-	for n > 0 {
-		select {
-		case ev := <-m.runner.Events:
-			if ev.Kind == runner.KindInit && ev.Phase.Terminal() {
-				n--
-			}
-		case <-timeout:
-			t.Fatal("timed out draining init events")
-		}
-	}
-}
-
-// I on a repo row queues init -upgrade for every module in the repo.
-func TestInitUpgradeRepoQueuesAllModules(t *testing.T) {
-	m := NewModel(config.Default(), state.New(t.TempDir()))
-	m.width, m.height = 100, 30
-	repo := &domain.Repo{Path: "/iac/repo1", Name: "repo1"}
-	m1 := &domain.Module{Repo: repo, Path: "/iac/repo1/a", RelPath: "a", TFBin: "terraform"}
-	m2 := &domain.Module{Repo: repo, Path: "/iac/repo1/b", RelPath: "b", TFBin: "terraform"}
-	repo.Modules = []*domain.Module{m1, m2}
-	m.repos = []*domain.Repo{repo}
-	m.reflow()
-	m.cursor = 0 // repo row
-
-	m.initUpgradeCurrent()
-
-	if !m.hasTask(runner.KindInit, m1.Path) || !m.hasTask(runner.KindInit, m2.Path) {
-		t.Errorf("init -upgrade not queued for every module: %v", m.tasks)
-	}
-	if !strings.Contains(m.status, "2 module") {
-		t.Errorf("status = %q", m.status)
-	}
-	drainInit(t, m, 2) // let the async jobs finish before TempDir cleanup
-}
-
-// I on a repo row under a filter only upgrades the modules left visible.
-func TestInitUpgradeRepoQueuesOnlyFilteredModules(t *testing.T) {
-	m := NewModel(config.Default(), state.New(t.TempDir()))
-	m.width, m.height = 100, 30
-	repo := &domain.Repo{Path: "/iac/repo1", Name: "repo1"}
-	m1 := &domain.Module{Repo: repo, Path: "/iac/repo1/a", RelPath: "a", TFBin: "terraform"}
-	m2 := &domain.Module{Repo: repo, Path: "/iac/repo1/b", RelPath: "b", TFBin: "terraform"}
-	repo.Modules = []*domain.Module{m1, m2}
-	m.repos = []*domain.Repo{repo}
-	m.filterText = "b"
-	m.reflow()
-	m.cursor = 0 // repo row
-
-	m.initUpgradeCurrent()
-
-	if m.hasTask(runner.KindInit, m1.Path) || !m.hasTask(runner.KindInit, m2.Path) {
-		t.Errorf("init -upgrade should be queued for b only: %v", m.tasks)
-	}
-	drainInit(t, m, 1)
-}
-
 // manyWorkspaces enumerates n workspaces so the list exceeds the screen.
 func manyWorkspaces(t *testing.T, m *Model, mod *domain.Module, n int) {
 	t.Helper()
@@ -85,21 +26,6 @@ func manyWorkspaces(t *testing.T, m *Model, mod *domain.Module, n int) {
 		names[i] = fmt.Sprintf("ws%02d", i)
 	}
 	enumerated(t, m, mod, names...)
-}
-
-func drainEnum(t *testing.T, m *Model, n int) {
-	t.Helper()
-	timeout := time.After(15 * time.Second)
-	for n > 0 {
-		select {
-		case ev := <-m.runner.Events:
-			if ev.Kind == runner.KindEnumerate && ev.Phase.Terminal() {
-				n--
-			}
-		case <-timeout:
-			t.Fatal("timed out draining enum events")
-		}
-	}
 }
 
 // At the bottom of a scrolled list, moving up should walk the cursor up the
@@ -169,17 +95,12 @@ func TestPageUpTwoStage(t *testing.T) {
 // Discovery should populate workspaces from the on-disk cache without kicking
 // off a (slow, rate-limited) enumeration.
 func TestDiscoveryUsesWorkspaceCache(t *testing.T) {
-	m := NewModel(config.Default(), state.New(t.TempDir()))
-	m.width, m.height = 100, 30
-	repo := &domain.Repo{Path: "/iac/repo1", Name: "repo1"}
-	mod := &domain.Module{Repo: repo, Path: "/iac/repo1/envs/prod", RelPath: "envs/prod"}
-	repo.Modules = []*domain.Module{mod}
-
+	m, mod := fixtureModel(t)
 	if err := m.store.SaveWorkspaces(mod.Path, []string{"default", "prod"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
-	m.updateDiscovery(discoveryMsg{repos: []*domain.Repo{repo}})
+	m.updateDiscovery(discoveryMsg{repos: m.repos})
 
 	if mod.WorkspaceState != domain.WorkspacesReady {
 		t.Fatalf("state = %v, want Ready (served from cache)", mod.WorkspaceState)
@@ -206,7 +127,7 @@ func TestRefreshWorkspacesReEnumerates(t *testing.T) {
 	if !strings.Contains(m.status, "re-enumerating") {
 		t.Errorf("status = %q", m.status)
 	}
-	drainEnum(t, m, 1) // let the async job finish before TempDir cleanup
+	drain(t, m, runner.KindEnumerate, 1) // let the async job finish before TempDir cleanup
 }
 
 // r fans out one gitStatusMsg (per repo) and one fingerprintMsg (per

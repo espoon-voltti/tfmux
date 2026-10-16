@@ -29,6 +29,11 @@ parallelism = 8
 terraform_bin = "tofu"
 tmux_session = "infra"
 plan_ttl = "2h30m"
+init_parallelism = 2
+
+[mcp]
+tools = "all"
+listen = "127.0.0.1:9000"
 
 [repos."~/work/iac/legacy"]
 terraform_bin = "terraform-0.13"
@@ -49,6 +54,12 @@ terraform_bin = "terraform-0.13"
 	if cfg.PlanTTLDuration() != 2*time.Hour+30*time.Minute {
 		t.Errorf("plan_ttl = %v", cfg.PlanTTLDuration())
 	}
+	if cfg.InitParallelism != 2 {
+		t.Errorf("init_parallelism = %d", cfg.InitParallelism)
+	}
+	if !cfg.MCP.AllTools() || cfg.MCP.Listen != "127.0.0.1:9000" {
+		t.Errorf("mcp = %+v", cfg.MCP)
+	}
 	if got := cfg.BinFor("/home/test/work/iac/legacy"); got != "terraform-0.13" {
 		t.Errorf("BinFor(legacy) = %q", got)
 	}
@@ -68,6 +79,9 @@ func TestLoadMissingFileReturnsDefaults(t *testing.T) {
 	if cfg.PlanTTLDuration() != 24*time.Hour {
 		t.Errorf("default plan_ttl = %v", cfg.PlanTTLDuration())
 	}
+	if cfg.InitParallelism != 0 || cfg.MCP.Listen != "127.0.0.1:7411" || cfg.MCP.AllTools() {
+		t.Errorf("defaults: init_parallelism=%d mcp=%+v", cfg.InitParallelism, cfg.MCP)
+	}
 }
 
 func TestLoadRejectsUnknownKeys(t *testing.T) {
@@ -83,6 +97,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		"empty bin":                 `terraform_bin = ""`,
 		"bad ttl":                   `plan_ttl = "soon"`,
 		"negative init_parallelism": `init_parallelism = -1`,
+		"unknown mcp.tools":         "[mcp]\ntools = 'some'",
+		"empty mcp.listen":          "[mcp]\nlisten = ''",
 	} {
 		if _, err := Load(writeConfig(t, content)); err == nil {
 			t.Errorf("%s: expected error", name)
@@ -90,65 +106,18 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 	}
 }
 
-func TestInitParallelismDefaultsToZero(t *testing.T) {
-	cfg, err := Load(writeConfig(t, `parallelism = 4`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.InitParallelism != 0 {
-		t.Errorf("InitParallelism = %d, want 0", cfg.InitParallelism)
-	}
-}
-
-func TestLoadInitParallelismOverride(t *testing.T) {
-	cfg, err := Load(writeConfig(t, `init_parallelism = 2`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.InitParallelism != 2 {
-		t.Errorf("InitParallelism = %d, want 2", cfg.InitParallelism)
-	}
-}
-
-// isolateEffectiveInitParallelismEnv clears every env var
-// PluginCacheDirConfigured consults and points HOME/APPDATA at an empty temp
-// dir, so the test doesn't pick up whatever the machine running it happens to
-// have configured for real.
-func isolateEffectiveInitParallelismEnv(t *testing.T) {
-	t.Helper()
-	empty := t.TempDir()
-	t.Setenv("HOME", empty)
-	t.Setenv("APPDATA", empty)
-	for _, k := range []string{"TF_PLUGIN_CACHE_DIR", "TF_CLI_CONFIG_FILE", "OPENTOFU_CLI_CONFIG_FILE"} {
-		t.Setenv(k, "")
-	}
-}
-
+// Detection itself is tfexec's; this covers only how the override and the
+// detected value combine.
 func TestEffectiveInitParallelism(t *testing.T) {
-	t.Run("explicit override wins even with a plugin cache configured", func(t *testing.T) {
-		isolateEffectiveInitParallelismEnv(t)
-		t.Setenv("TF_PLUGIN_CACHE_DIR", "/tmp/cache")
-		cfg := Default()
-		cfg.InitParallelism = 3
-		if got := cfg.EffectiveInitParallelism(); got != 3 {
-			t.Errorf("got %d, want 3", got)
-		}
-	})
-	t.Run("auto-detects a plugin cache from the env var", func(t *testing.T) {
-		isolateEffectiveInitParallelismEnv(t)
-		t.Setenv("TF_PLUGIN_CACHE_DIR", "/tmp/cache")
-		cfg := Default()
-		if got := cfg.EffectiveInitParallelism(); got != 1 {
-			t.Errorf("got %d, want 1", got)
-		}
-	})
-	t.Run("unlimited when nothing is configured", func(t *testing.T) {
-		isolateEffectiveInitParallelismEnv(t)
-		cfg := Default()
-		if got := cfg.EffectiveInitParallelism(); got != 0 {
-			t.Errorf("got %d, want 0", got)
-		}
-	})
+	t.Setenv("TF_PLUGIN_CACHE_DIR", "/tmp/cache")
+	cfg := Default()
+	if got := cfg.EffectiveInitParallelism(); got != 1 {
+		t.Errorf("a plugin cache should cap inits at 1, got %d", got)
+	}
+	cfg.InitParallelism = 3
+	if got := cfg.EffectiveInitParallelism(); got != 3 {
+		t.Errorf("an explicit value should win, got %d", got)
+	}
 }
 
 func TestCreateWritesLoadableConfig(t *testing.T) {
@@ -180,29 +149,5 @@ func TestCreateRefusesExistingFile(t *testing.T) {
 	got, _ := os.ReadFile(path)
 	if string(got) != "parallelism = 2\n" {
 		t.Errorf("existing file was modified: %q", got)
-	}
-}
-
-func TestMCPConfig(t *testing.T) {
-	cfg := Default()
-	if cfg.MCP.Listen != "127.0.0.1:7411" || cfg.MCP.AllTools() {
-		t.Errorf("defaults: %+v", cfg.MCP)
-	}
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte("roots = ['/x']\n[mcp]\ntools = 'all'\nlisten = '127.0.0.1:9000'\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.MCP.AllTools() || cfg.MCP.Listen != "127.0.0.1:9000" {
-		t.Errorf("loaded: %+v", cfg.MCP)
-	}
-	if err := os.WriteFile(path, []byte("roots = ['/x']\n[mcp]\ntools = 'some'\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(path); err == nil {
-		t.Error("invalid mcp.tools accepted")
 	}
 }

@@ -24,6 +24,45 @@ func isolateEnv(t *testing.T) string {
 	return home
 }
 
+func TestPluginCacheDirConfigured(t *testing.T) {
+	const cache = `plugin_cache_dir = "/some/cache"`
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, home string)
+		want  bool
+	}{
+		// No file at all is the common case and must never default to
+		// throttling everyone.
+		{"nothing set", func(*testing.T, string) {}, false},
+		{"TF_PLUGIN_CACHE_DIR", func(t *testing.T, _ string) { t.Setenv("TF_PLUGIN_CACHE_DIR", "/some/cache") }, true},
+		{"~/.terraformrc sets it", func(t *testing.T, home string) { writeFile(t, filepath.Join(home, ".terraformrc"), cache) }, true},
+		{"~/.terraformrc without it", func(t *testing.T, home string) {
+			writeFile(t, filepath.Join(home, ".terraformrc"), `disable_checkpoint = true`)
+		}, false},
+		{"TF_CLI_CONFIG_FILE", func(t *testing.T, home string) {
+			path := filepath.Join(home, "custom.tfrc")
+			writeFile(t, path, cache)
+			t.Setenv("TF_CLI_CONFIG_FILE", path)
+		}, true},
+		{"~/.tofurc sets it", func(t *testing.T, home string) { writeFile(t, filepath.Join(home, ".tofurc"), cache) }, true},
+		// Terraform also accepts a JSON-format CLI config file, which the
+		// HCL-only parser rejects: fail closed rather than report "not
+		// configured".
+		{"unparseable file fails closed", func(t *testing.T, home string) {
+			writeFile(t, filepath.Join(home, ".terraformrc"), `{"plugin_cache_dir": "/some/cache"}`)
+		}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			home := isolateEnv(t)
+			c.setup(t, home)
+			if got := PluginCacheDirConfigured(); got != c.want {
+				t.Errorf("PluginCacheDirConfigured() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -31,74 +70,5 @@ func writeFile(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestPluginCacheDirConfiguredNothingSet(t *testing.T) {
-	isolateEnv(t)
-	if PluginCacheDirConfigured() {
-		t.Error("expected false with no env vars or CLI config files present")
-	}
-}
-
-func TestPluginCacheDirConfiguredEnvVar(t *testing.T) {
-	isolateEnv(t)
-	t.Setenv("TF_PLUGIN_CACHE_DIR", "/some/cache")
-	if !PluginCacheDirConfigured() {
-		t.Error("expected true when TF_PLUGIN_CACHE_DIR is set")
-	}
-}
-
-func TestPluginCacheDirConfiguredInCLIConfigFile(t *testing.T) {
-	home := isolateEnv(t)
-	writeFile(t, filepath.Join(home, ".terraformrc"), `plugin_cache_dir = "/some/cache"`)
-	if !PluginCacheDirConfigured() {
-		t.Error("expected true when ~/.terraformrc sets plugin_cache_dir")
-	}
-}
-
-func TestPluginCacheDirNotConfiguredInCLIConfigFile(t *testing.T) {
-	home := isolateEnv(t)
-	writeFile(t, filepath.Join(home, ".terraformrc"), `disable_checkpoint = true`)
-	if PluginCacheDirConfigured() {
-		t.Error("expected false when the CLI config file exists but doesn't set plugin_cache_dir")
-	}
-}
-
-func TestPluginCacheDirConfiguredViaTFCLIConfigFileEnv(t *testing.T) {
-	home := isolateEnv(t)
-	path := filepath.Join(home, "custom.tfrc")
-	writeFile(t, path, `plugin_cache_dir = "/some/cache"`)
-	t.Setenv("TF_CLI_CONFIG_FILE", path)
-	if !PluginCacheDirConfigured() {
-		t.Error("expected true when TF_CLI_CONFIG_FILE points at a file setting plugin_cache_dir")
-	}
-}
-
-func TestPluginCacheDirConfiguredInOpenTofuConfigFile(t *testing.T) {
-	home := isolateEnv(t)
-	writeFile(t, filepath.Join(home, ".tofurc"), `plugin_cache_dir = "/some/cache"`)
-	if !PluginCacheDirConfigured() {
-		t.Error("expected true when ~/.tofurc sets plugin_cache_dir")
-	}
-}
-
-func TestPluginCacheDirFailsClosedOnUnparseableFile(t *testing.T) {
-	home := isolateEnv(t)
-	// Terraform also accepts a JSON-format CLI config file, which the
-	// HCL-only parser here rejects — must fail closed, not silently report
-	// "not configured".
-	writeFile(t, filepath.Join(home, ".terraformrc"), `{"plugin_cache_dir": "/some/cache"}`)
-	if !PluginCacheDirConfigured() {
-		t.Error("expected true (fail closed) when the CLI config file exists but can't be parsed")
-	}
-}
-
-func TestPluginCacheDirMissingFileIsUnambiguouslyFalse(t *testing.T) {
-	isolateEnv(t)
-	// No file at all is the common case and must never default to
-	// throttling everyone.
-	if PluginCacheDirConfigured() {
-		t.Error("expected false when no CLI config file exists")
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/espoon-voltti/tfmux/internal/config"
+	"github.com/espoon-voltti/tfmux/internal/gittest"
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/tftest"
@@ -49,19 +50,6 @@ module "waf" {
 }
 `
 
-func git(t *testing.T, repo string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
-		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-}
-
 // estate builds one repo with base and service root modules (service reads
 // base's state), a cached workspace list for each, and returns the config
 // and store a server needs. The fake terraform binary stands in for the
@@ -74,23 +62,13 @@ type estate struct {
 
 func newEstate(t *testing.T) *estate {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
 	root := t.TempDir()
 	repo := filepath.Join(root, "demo-infra")
 	for name, tf := range map[string]string{"base": baseTF, "service": serviceTF} {
-		dir := filepath.Join(repo, "terraform", name)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(tf), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		gittest.WriteFile(t, filepath.Join(repo, "terraform", name, "main.tf"), tf)
 	}
-	git(t, repo, "init", "-q", "-b", "main")
-	git(t, repo, "add", ".")
-	git(t, repo, "commit", "-q", "-m", "init")
+	gittest.Run(t, repo, "init", "-q", "-b", "main")
+	gittest.CommitAll(t, repo, "init")
 
 	bin := tftest.Write(t, t.TempDir())
 	t.Setenv("TFMUX_FAKE_LOG", filepath.Join(t.TempDir(), "calls.log"))
@@ -164,27 +142,20 @@ func call(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any)
 	return text, structured, res
 }
 
-func TestReadOnlyToolSet(t *testing.T) {
-	cs := connect(t, newEstate(t), false)
-	names := toolNames(t, cs)
-	for _, want := range []string{"list", "pending", "deps", "plan_log", "plan", "output", "enumerate_workspaces", "refresh"} {
-		if !names[want] {
-			t.Errorf("missing read-only tool %s", want)
+func TestToolSets(t *testing.T) {
+	readOnly := []string{"list", "pending", "deps", "plan_log", "plan", "output", "enumerate_workspaces", "refresh"}
+	write := []string{"apply", "init_upgrade", "discard_plan"}
+	for _, all := range []bool{false, true} {
+		names := toolNames(t, connect(t, newEstate(t), all))
+		for _, want := range readOnly {
+			if !names[want] {
+				t.Errorf("all=%v: missing read-only tool %s", all, want)
+			}
 		}
-	}
-	for _, absent := range []string{"apply", "init_upgrade", "discard_plan"} {
-		if names[absent] {
-			t.Errorf("write tool %s exposed on a read-only server", absent)
-		}
-	}
-}
-
-func TestAllToolSet(t *testing.T) {
-	cs := connect(t, newEstate(t), true)
-	names := toolNames(t, cs)
-	for _, want := range []string{"apply", "init_upgrade", "discard_plan", "plan"} {
-		if !names[want] {
-			t.Errorf("missing tool %s", want)
+		for _, w := range write {
+			if names[w] != all {
+				t.Errorf("all=%v: write tool %s registered=%v", all, w, names[w])
+			}
 		}
 	}
 }
@@ -275,6 +246,39 @@ func TestPlanThenPlanLogAndOutput(t *testing.T) {
 	text, _, res = call(t, cs, "output", args)
 	if res.IsError || !strings.Contains(text, `greeting = "hello"`) {
 		t.Errorf("output: err=%v text=%q", res.IsError, text)
+	}
+}
+
+// A failed plan records the fingerprint it ran against like any other, so it
+// is reported as a plan error and nothing else.
+func TestPlanErrorIsOnlyAPlanError(t *testing.T) {
+	e := newEstate(t)
+	t.Setenv("TFMUX_FAKE_PLAN_STDERR", "Error: Error acquiring the state lock")
+	cs := connect(t, e, false)
+	args := map[string]any{"module": "demo-infra/terraform/service", "workspace": "prod"}
+	text, structured, res := call(t, cs, "plan", args)
+	if res.IsError {
+		t.Fatalf("plan: %s", text)
+	}
+	reasons := structured["reasons"].([]any)
+	if len(reasons) != 1 || reasons[0].(map[string]any)["code"] != "plan-error" || reasons[0].(map[string]any)["detail"] != "state locked" {
+		t.Errorf("reasons = %v, want only plan-error", reasons)
+	}
+	text, _, _ = call(t, cs, "pending", map[string]any{"needs_plan_only": true})
+	if strings.Contains(text, "service  prod") {
+		t.Errorf("a plan error is not a missing plan:\n%s", text)
+	}
+}
+
+// When the lazy init a plan deferred to fails, the plan's error names it
+// instead of reading as a bare cancellation.
+func TestPlanReportsFailedLazyInit(t *testing.T) {
+	e := newEstate(t)
+	t.Setenv("TFMUX_FAKE_INIT_STDERR", "Error: Failed to query available provider packages")
+	cs := connect(t, e, false)
+	text, _, res := call(t, cs, "plan", map[string]any{"module": "demo-infra/terraform/service", "workspace": "prod"})
+	if !res.IsError || !strings.Contains(text, "terraform init failed") || !strings.Contains(text, "Failed to query") {
+		t.Errorf("plan after a failed init: err=%v %q", res.IsError, text)
 	}
 }
 

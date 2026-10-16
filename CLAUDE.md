@@ -35,7 +35,8 @@ but plain `go` works too:
 
 Tests need **no cloud credentials**: a fake `terraform` shell stub in
 `internal/tftest` stands in for the real binary, including the end-to-end TUI
-test (`internal/ui/e2e_test.go`, via teatest).
+test (`internal/ui/e2e_test.go`, via teatest). Tests that need a git repo
+build one with `internal/gittest` (fixed identity, no user config).
 
 ## Layout
 
@@ -63,7 +64,8 @@ test (`internal/ui/e2e_test.go`, via teatest).
   content fingerprint plans are checked against.
 - `internal/report` — the estate/pending/deps reports and their text printers,
   shared by the CLI subcommands and the MCP tools; also `DiscoverWithGit`,
-  `VisibleRepos`, `CheckPins`, `InvalidateDownstream`.
+  `VisibleRepos`, `CheckPins`, and `Downstream` (the one-hop remote-state
+  traversal the TUI and `InvalidateDownstream` both mark from).
 - `internal/mcpserver` — tfmux as an MCP server over the same runner, store and
   reports. `register` in `tools.go` is the one place that decides which tools
   exist; every write tool is behind `AllTools`.

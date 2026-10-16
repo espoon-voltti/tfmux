@@ -57,8 +57,9 @@ type Server struct {
 	ignore state.Ignore
 	index  *deps.Index
 
-	waitMu  sync.Mutex
-	waiters map[string][]chan runner.Event
+	waitMu        sync.Mutex
+	waiters       map[string][]chan runner.Event
+	applyOutcomes map[string]applyOutcome // workspace key -> outcome awaiting its tool call
 
 	// launchHooks run on an apply's PhaseRunning event (keyed by workspace
 	// key) so the run record learns the tmux window before the apply ends.
@@ -75,12 +76,13 @@ func New(ctx context.Context, o Options) (*Server, error) {
 		tmux = tmuxctl.New(o.Cfg.TmuxSession)
 	}
 	s := &Server{
-		cfg:      o.Cfg,
-		store:    o.Store,
-		tmux:     tmux,
-		allTools: o.AllTools,
-		log:      o.Log,
-		waiters:  map[string][]chan runner.Event{},
+		cfg:           o.Cfg,
+		store:         o.Store,
+		tmux:          tmux,
+		allTools:      o.AllTools,
+		log:           o.Log,
+		waiters:       map[string][]chan runner.Event{},
+		applyOutcomes: map[string]applyOutcome{},
 	}
 	if err := s.discover(ctx); err != nil {
 		return nil, err
@@ -101,7 +103,7 @@ func (discard) Write(p []byte) (int, error) { return len(p), nil }
 // MCP returns the server to serve over a transport.
 func (s *Server) MCP() *mcp.Server { return s.mcp }
 
-// Close cancels every in-flight task.
+// Close cancels every task a tool call is waiting on.
 func (s *Server) Close() {
 	s.waitMu.Lock()
 	keys := make([]string, 0, len(s.waiters))
@@ -111,7 +113,7 @@ func (s *Server) Close() {
 	s.waitMu.Unlock()
 	for _, id := range keys {
 		if _, key, ok := strings.Cut(id, ":"); ok {
-			s.runner.Cancel(key)
+			s.runner.CancelKey(key)
 		}
 	}
 }
@@ -209,6 +211,9 @@ func (s *Server) resolveWorkspace(label, workspace string) (*domain.Workspace, e
 	if err != nil {
 		return nil, err
 	}
+	// Workspace lists are replaced by pump under s.mu as enumerations finish.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if mod.WorkspaceState != domain.WorkspacesReady {
 		return nil, fmt.Errorf("%s: workspaces unknown; call enumerate_workspaces first", label)
 	}
@@ -231,8 +236,10 @@ func fingerprint(ctx context.Context, mod *domain.Module) string {
 // --- runner plumbing ---
 
 // pump delivers each terminal runner event to the tool calls waiting on
-// that task, and keeps the estate's workspace lists in step with
-// enumerations.
+// that task, keeps the estate's workspace lists in step with enumerations,
+// and records every apply's outcome. The bookkeeping happens here rather
+// than in the tool call so that a client that disconnects mid-apply still
+// leaves a complete run record behind.
 func (s *Server) pump() {
 	for ev := range s.runner.Events {
 		if !ev.Phase.Terminal() {
@@ -243,12 +250,21 @@ func (s *Server) pump() {
 			}
 			continue
 		}
-		if ev.Kind == runner.KindEnumerate && ev.Phase == runner.PhaseDone {
+		switch {
+		case ev.Kind == runner.KindEnumerate && ev.Phase == runner.PhaseDone:
 			s.mu.Lock()
 			if mod := s.findModule(ev.ModulePath); mod != nil {
 				setWorkspaces(mod, ev.Workspaces)
 			}
 			s.mu.Unlock()
+		case ev.Kind == runner.KindApply && ev.Phase == runner.PhaseDone:
+			outcome := s.finishApply(ev)
+			s.logf("apply %s: %s", ev.Key, outcome.status)
+			s.waitMu.Lock()
+			if len(s.waiters[runner.TaskID(ev.Kind, ev.Key)]) > 0 {
+				s.applyOutcomes[ev.Key] = outcome
+			}
+			s.waitMu.Unlock()
 		}
 		id := runner.TaskID(ev.Kind, ev.Key)
 		s.waitMu.Lock()
@@ -259,6 +275,74 @@ func (s *Server) pump() {
 			ch <- ev
 		}
 	}
+}
+
+// applyOutcome is what finishApply made of an apply's terminal event, for
+// the tool call that launched it.
+type applyOutcome struct {
+	status string
+	marked []string // downstream workspace keys now needing a plan
+}
+
+// finishApply records an apply's end in its run record and, on success,
+// discards the plan file and marks downstream workspaces.
+func (s *Server) finishApply(ev runner.Event) applyOutcome {
+	workspace := splitKey(ev.Key)
+	rec, _ := s.store.LoadRun(ev.ModulePath, workspace)
+	now := time.Now()
+	var out applyOutcome
+	switch {
+	case ev.Aborted:
+		out.status = "apply window closed without finishing — state unknown, re-plan"
+		if rec != nil && rec.Apply != nil {
+			rec.Apply.Finished, rec.Apply.Aborted = &now, true
+			_ = s.store.SaveRun(rec)
+		}
+	case ev.ApplyExit == nil:
+		out.status = "apply ended without an exit code"
+	case *ev.ApplyExit != 0:
+		out.status = fmt.Sprintf("apply failed (exit %d) — its tmux window is left open for inspection", *ev.ApplyExit)
+		if rec != nil && rec.Apply != nil {
+			rec.Apply.Finished, rec.Apply.ExitCode = &now, ev.ApplyExit
+			_ = s.store.SaveRun(rec)
+		}
+	default:
+		out.status = "applied"
+		if rec != nil && rec.Apply != nil {
+			rec.Apply.Finished, rec.Apply.ExitCode = &now, ev.ApplyExit
+			_ = s.store.SaveRun(rec)
+		}
+		_ = s.store.DiscardPlan(ev.ModulePath, workspace)
+		if rec != nil {
+			s.mu.Lock()
+			if up := s.findModule(ev.ModulePath); up != nil {
+				out.marked = report.InvalidateDownstream(s.store, s.index, up, rec, now)
+			}
+			s.mu.Unlock()
+		}
+		if len(out.marked) > 0 {
+			out.status += fmt.Sprintf("; %d downstream workspace(s) now need a plan: %s", len(out.marked), strings.Join(out.marked, ", "))
+		}
+	}
+	return out
+}
+
+// takeApplyOutcome returns and forgets the outcome stored for a workspace's
+// apply while a tool call was waiting on it.
+func (s *Server) takeApplyOutcome(key string) (applyOutcome, bool) {
+	s.waitMu.Lock()
+	defer s.waitMu.Unlock()
+	out, ok := s.applyOutcomes[key]
+	delete(s.applyOutcomes, key)
+	return out, ok
+}
+
+// splitKey returns the workspace name of a workspace key.
+func splitKey(key string) string {
+	if i := strings.LastIndex(key, "//"); i >= 0 {
+		return key[i+2:]
+	}
+	return key
 }
 
 // findModule must be called with s.mu held.
@@ -298,7 +382,7 @@ func (s *Server) await(ctx context.Context, kind runner.Kind, key string, enqueu
 		}
 		if len(s.waiters[id]) == 0 {
 			delete(s.waiters, id)
-			s.runner.Cancel(key)
+			s.runner.Cancel(kind, key)
 		}
 		s.waitMu.Unlock()
 		return runner.Event{}, ctx.Err()
