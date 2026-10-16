@@ -356,7 +356,9 @@ func TestCancelledCallCancelsTask(t *testing.T) {
 
 func TestStripProgress(t *testing.T) {
 	log := `module.a.aws_thing.x: Refreshing state... [id=abc]
+module.a.aws_ecr_account_setting.v: Refreshing state... [name=BASIC_SCAN_TYPE_VERSION]
 data.aws_caller_identity.current: Reading...
+data.aws_caller_identity.current: Still reading... [10s elapsed]
 data.aws_caller_identity.current: Read complete after 0s [id=123]
 
 Terraform used the selected providers to generate the following execution
@@ -365,7 +367,7 @@ plan.
 Plan: 1 to add, 0 to change, 0 to destroy.
 `
 	got := stripProgress(log)
-	if strings.Contains(got, "Refreshing") || strings.Contains(got, "Reading") || strings.Contains(got, "Read complete") {
+	if strings.Contains(got, "Refreshing") || strings.Contains(got, "eading") || strings.Contains(got, "Read complete") {
 		t.Errorf("progress lines kept:\n%s", got)
 	}
 	if !strings.HasPrefix(got, "Terraform used") || !strings.Contains(got, "Plan: 1 to add") {

@@ -259,15 +259,23 @@ func (s *Server) planOut(ctx context.Context, mod string, ws *domain.Workspace, 
 func stripProgress(log string) string {
 	var kept []string
 	for _, line := range strings.Split(log, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasSuffix(trimmed, ": Refreshing state...") || strings.HasSuffix(trimmed, ": Reading...") ||
-			strings.Contains(trimmed, ": Read complete after ") || strings.Contains(trimmed, ": Refreshing state... [id=") ||
-			strings.Contains(trimmed, ": Reading... [id=") {
+		if isProgress(line) {
 			continue
 		}
 		kept = append(kept, line)
 	}
 	return strings.TrimLeft(strings.Join(kept, "\n"), "\n")
+}
+
+var progressMarkers = []string{": Refreshing state...", ": Reading...", ": Read complete after ", ": Still reading..."}
+
+func isProgress(line string) bool {
+	for _, m := range progressMarkers {
+		if strings.Contains(line, m) {
+			return true
+		}
+	}
+	return false
 }
 
 func tailLines(s string, n int) string {
