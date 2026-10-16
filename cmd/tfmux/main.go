@@ -16,15 +16,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/espoon-voltti/tfmux/internal/config"
-	"github.com/espoon-voltti/tfmux/internal/discovery"
 	"github.com/espoon-voltti/tfmux/internal/domain"
-	"github.com/espoon-voltti/tfmux/internal/gitstatus"
 	"github.com/espoon-voltti/tfmux/internal/paths"
+	"github.com/espoon-voltti/tfmux/internal/report"
 	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/ui"
 )
@@ -56,6 +54,8 @@ func run(args []string) error {
 		return runPending(args)
 	case "deps":
 		return runDeps(args)
+	case "mcp":
+		return runMCP(args)
 	case "tui":
 		return runTUI()
 	case "help", "--help", "-h":
@@ -82,6 +82,10 @@ commands:
   deps       what each root module depends on: git and local modules, remote
              states (resolved to the root module holding them); --reverse lists
              who depends on each; an argument filters by substring; --json
+  mcp        serve tfmux as an MCP server for an agent elsewhere (e.g. in a
+             sandbox): read-only tools by default, --all adds apply/init/
+             discard; HTTP on 127.0.0.1:7411 with a bearer token
+             (--print-config shows the client setup), or --stdio
   version    print version
 `)
 }
@@ -153,31 +157,13 @@ func configExistsError(path string) error {
 	return fmt.Errorf("config file %s already exists; edit it to change settings", path)
 }
 
-func discoverWithGit(ctx context.Context, cfg *config.Config) ([]*domain.Repo, error) {
-	repos, err := discovery.Discover(cfg.Roots)
-	if err != nil {
-		return nil, err
-	}
-	git := gitstatus.CLI{}
-	var wg sync.WaitGroup
-	for _, repo := range repos {
-		wg.Add(1)
-		go func(r *domain.Repo) {
-			defer wg.Done()
-			r.Git = git.Status(ctx, r.Path)
-		}(repo)
-	}
-	wg.Wait()
-	return repos, nil
-}
-
 func runLs(args []string) error {
 	asJSON := len(args) > 0 && args[0] == "--json"
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	repos, err := discoverWithGit(context.Background(), cfg)
+	repos, err := report.DiscoverWithGit(context.Background(), cfg)
 	if err != nil {
 		return err
 	}

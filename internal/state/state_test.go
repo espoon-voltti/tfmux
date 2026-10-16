@@ -164,3 +164,19 @@ func TestInitWorkspaceRoundTrip(t *testing.T) {
 		t.Errorf("second Clear: %v", err)
 	}
 }
+
+func TestMCPTokenIsCreatedOnceAndStable(t *testing.T) {
+	s := New(t.TempDir())
+	a, err := s.MCPToken()
+	if err != nil || len(a) != 64 {
+		t.Fatalf("token %q err %v", a, err)
+	}
+	b, _ := s.MCPToken()
+	if a != b {
+		t.Error("token must be stable across calls")
+	}
+	info, err := os.Stat(filepath.Join(s.Dir, "mcp.token"))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("mode %v err %v", info.Mode(), err)
+	}
+}

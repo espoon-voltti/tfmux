@@ -120,6 +120,20 @@ const (
 // Terminal reports whether the phase ends the task.
 func (p Phase) Terminal() bool { return p != PhaseRunning }
 
+func (p Phase) String() string {
+	switch p {
+	case PhaseRunning:
+		return "running"
+	case PhaseDone:
+		return "done"
+	case PhaseFailed:
+		return "failed"
+	case PhaseCanceled:
+		return "canceled"
+	}
+	return fmt.Sprintf("phase(%d)", int(p))
+}
+
 // Event reports a task lifecycle transition. Kind/Key/ModulePath identify the
 // task (queued state is owned by the caller; the runner reports running and
 // terminal transitions). Payload fields are populated per kind.

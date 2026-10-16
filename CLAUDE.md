@@ -40,7 +40,8 @@ test (`internal/ui/e2e_test.go`, via teatest).
 ## Layout
 
 - `cmd/tfmux/main.go` — entrypoint and subcommands: `tui` (default), `init`,
-  `ls [--json]`, `pending` (`pending.go`), `deps` (`deps.go`), `version`.
+  `ls [--json]`, `pending` (`pending.go`), `deps` (`deps.go`), `mcp`
+  (`mcp.go`: transport, bearer token, `--print-config`), `version`.
 - `internal/domain` — shared model (Repo → Module → Workspace) and statuses. Has
   **no dependencies on other tfmux packages**; keep it that way so every layer
   can import it.
@@ -60,6 +61,12 @@ test (`internal/ui/e2e_test.go`, via teatest).
 - `internal/config` / `internal/paths` — TOML config and XDG path resolution.
 - `internal/gitstatus` — branch/dirty/ahead-behind snapshot, and the per-module
   content fingerprint plans are checked against.
+- `internal/report` — the estate/pending/deps reports and their text printers,
+  shared by the CLI subcommands and the MCP tools; also `DiscoverWithGit`,
+  `VisibleRepos`, `CheckPins`, `InvalidateDownstream`.
+- `internal/mcpserver` — tfmux as an MCP server over the same runner, store and
+  reports. `register` in `tools.go` is the one place that decides which tools
+  exist; every write tool is behind `AllTools`.
 - `internal/attention` — pure "what needs attention" assessment of a workspace
   from its run record and fingerprint; the TUI status cell and `tfmux pending`
   must both go through it.
@@ -99,6 +106,10 @@ consequences:
   workspace the dir is initialised for; plan/output/apply re-init on mismatch.
 - **Plan files contain secrets:** stored under the XDG state dir with 0700/0600
   perms, deleted after a successful apply, on discard, and after `plan_ttl`.
+- **MCP write tools are opt-in.** `tfmux mcp` registers apply/init/discard only
+  with `--all` or `tools = "all"`; the HTTP endpoint needs the bearer token
+  unless `--no-auth` on loopback. Tools return terraform's text, never plan
+  JSON or plan files (they embed secrets).
 - **Dependency walks are one hop.** Root modules in the wild read each other's
   state in cycles. `deps.Index` holds direct edges; downstream invalidation
   after an apply marks direct dependents and stops. Anything transitive needs

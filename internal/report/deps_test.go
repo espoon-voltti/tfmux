@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
-package main
+package report
 
 import (
 	"os"
@@ -50,13 +50,13 @@ module "waf" {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mods, ix, behind := depsReport(state.Ignore{}, repos)
+	mods, ix, behind := Deps(state.Ignore{}, repos)
 	if len(mods) != 2 {
 		t.Fatalf("modules = %+v", mods)
 	}
 
 	var fwd strings.Builder
-	printDepsForward(&fwd, mods, behind, "app-infra")
+	PrintDepsForward(&fwd, mods, behind, "app-infra")
 	if !strings.Contains(fwd.String(), "state   base-infra/terraform/base  (base, workspace: same)") {
 		t.Errorf("forward output should resolve the upstream root module:\n%s", fwd.String())
 	}
@@ -65,7 +65,7 @@ module "waf" {
 	}
 
 	var rev strings.Builder
-	printDepsReverse(&rev, ix, behind, "shared//modules/waf")
+	PrintDepsReverse(&rev, ix, behind, "shared//modules/waf")
 	got := rev.String()
 	if !strings.Contains(got, "github.com/org/shared//modules/waf\n") ||
 		!strings.Contains(got, "app-infra/terraform/app @v18") ||
@@ -77,7 +77,7 @@ module "waf" {
 	}
 
 	rev.Reset()
-	printDepsReverse(&rev, ix, behind, "s3://b/k")
+	PrintDepsReverse(&rev, ix, behind, "s3://b/k")
 	if !strings.Contains(rev.String(), "app-infra/terraform/app  (base, workspace: same)") {
 		t.Errorf("reverse state output:\n%s", rev.String())
 	}

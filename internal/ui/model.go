@@ -270,6 +270,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case fingerprintMsg:
 		m.fingerprints[msg.modulePath] = msg.fingerprint
+		m.recountTree()
 		m.noteRefreshDone(msg.gen)
 		return m, nil
 
@@ -677,6 +678,7 @@ func (m *Model) planDone(ev runner.Event) tea.Cmd {
 	if ev.Record != nil {
 		m.runs[ev.Key] = ev.Record
 		m.planFiles[ev.Key] = ev.Record.PlanExitCode == tfexec.PlanChanges
+		m.recountTree()
 		if mod := m.findModule(ev.Record.ModulePath); mod != nil {
 			return fingerprintCmd(mod, 0)
 		}
@@ -699,6 +701,7 @@ func (m *Model) applyDone(ev runner.Event) tea.Cmd {
 	}
 	now := time.Now()
 	rec.Apply.Finished = &now
+	defer m.recountTree()
 	switch {
 	case ev.Aborted:
 		rec.Apply.Aborted = true
@@ -744,7 +747,7 @@ func (m *Model) invalidateDownstream(upstream *state.RunRecord, now time.Time) (
 			if rec == nil || rec.Invalidated != nil {
 				continue
 			}
-			if !readsWorkspace(down, up, ws.Name, upstream.Workspace) {
+			if !deps.ReadsWorkspace(down, up, ws.Name, upstream.Workspace) {
 				continue
 			}
 			rec.Invalidated = &state.Invalidation{By: by, At: now}
@@ -752,21 +755,6 @@ func (m *Model) invalidateDownstream(upstream *state.RunRecord, now time.Time) (
 		}
 	}
 	return len(cmds), cmds
-}
-
-// readsWorkspace reports whether down, run in workspace ws, reads upstream
-// workspace target of up's state through any of its remote-state blocks.
-func readsWorkspace(down, up *domain.Module, ws, target string) bool {
-	for _, rs := range down.Deps.RemoteStates {
-		if !up.Deps.Backend.SameState(rs.StateAddress) {
-			continue
-		}
-		mapped, known := deps.MapWorkspace(rs, ws)
-		if !known || mapped == target {
-			return true
-		}
-	}
-	return false
 }
 
 // --- task log viewer / live follow ---
@@ -1039,6 +1027,7 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if r, ok := m.currentRow(); ok && r.kind == rowWorkspace {
 			k := r.ws.Key()
 			m.planFiles[k] = false
+			m.recountTree()
 			m.status = "plan discarded: " + r.ws.Name
 			return m, discardPlanCmd(m.store, r.mod.Path, r.ws.Name)
 		}
@@ -1631,24 +1620,11 @@ func (m *Model) applyCurrent() tea.Cmd {
 	return nil
 }
 
-// applyBlocker reports why a workspace's plan can't be applied right now, or ""
-// when it's ready: a plan with outstanding changes, an on-disk plan file, no
-// apply already in flight, and not stale.
+// applyBlocker reports why a workspace's plan can't be applied right now, or
+// "" when it's ready (see attention.ApplyBlocker).
 func (m *Model) applyBlocker(key string) string {
-	rec := m.runs[key]
-	switch {
-	case m.hasTask(runner.KindPlan, key):
-		return "plan still running"
-	case rec == nil || rec.PlanExitCode != tfexec.PlanChanges:
-		return "nothing to apply — run a plan with changes first"
-	case !m.planFiles[key]:
-		return "plan file expired or discarded — re-plan first"
-	case m.hasTask(runner.KindApply, key):
-		return "apply already queued/running — press enter to attach"
-	case m.isStale(rec):
-		return "plan is STALE (module or upstream state changed since plan) — re-plan, or attach and apply manually"
-	}
-	return ""
+	modulePath, _, _ := splitWSKey(key)
+	return attention.ApplyBlocker(m.runs[key], m.planFiles[key], m.hasTask(runner.KindPlan, key), m.hasTask(runner.KindApply, key), m.fingerprints[modulePath])
 }
 
 // applyWorkspace queues an apply for one workspace, reporting why if it can't.

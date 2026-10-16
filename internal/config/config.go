@@ -39,7 +39,24 @@ type Config struct {
 	// OpenTofu plugin cache is configured (see tfexec.PluginCacheDirConfigured),
 	// unlimited otherwise. A positive value overrides detection.
 	InitParallelism int `toml:"init_parallelism"`
+
+	MCP MCPConfig `toml:"mcp"`
 }
+
+// MCPConfig configures `tfmux mcp`.
+type MCPConfig struct {
+	Listen string `toml:"listen"` // HTTP listen address
+	Tools  string `toml:"tools"`  // "read-only" (default) or "all"
+}
+
+const (
+	MCPToolsReadOnly = "read-only"
+	MCPToolsAll      = "all"
+)
+
+// AllTools reports whether the write tools (apply, init -upgrade, discard)
+// are exposed.
+func (c MCPConfig) AllTools() bool { return c.Tools == MCPToolsAll }
 
 // duration wraps time.Duration so TOML strings like "24h" round-trip.
 type duration time.Duration
@@ -80,6 +97,7 @@ func Default() *Config {
 		TerraformBin: "terraform",
 		TmuxSession:  "tfmux",
 		PlanTTL:      duration(24 * time.Hour),
+		MCP:          MCPConfig{Listen: "127.0.0.1:7411", Tools: MCPToolsReadOnly},
 	}
 }
 
@@ -157,6 +175,12 @@ func (c *Config) normalize() error {
 	}
 	if c.InitParallelism < 0 {
 		return fmt.Errorf("init_parallelism must be >= 0, got %d", c.InitParallelism)
+	}
+	if c.MCP.Tools != MCPToolsReadOnly && c.MCP.Tools != MCPToolsAll {
+		return fmt.Errorf("mcp.tools must be %q or %q, got %q", MCPToolsReadOnly, MCPToolsAll, c.MCP.Tools)
+	}
+	if c.MCP.Listen == "" {
+		return errors.New("mcp.listen must not be empty")
 	}
 	for i, r := range c.Roots {
 		expanded, err := paths.ExpandHome(r)

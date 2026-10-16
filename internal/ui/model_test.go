@@ -228,6 +228,37 @@ func TestPlanFinishedUpdatesStatusAndBadge(t *testing.T) {
 	}
 }
 
+// The title bar's "need plan" count must track plan results and fingerprints
+// as they arrive, not only tree rebuilds.
+func TestNeedPlanCountFollowsPlanResults(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	if m.nNeedPlan != 1 {
+		t.Fatalf("nNeedPlan = %d before any plan, want 1", m.nNeedPlan)
+	}
+	rec := &state.RunRecord{ModulePath: mod.Path, Workspace: "prod", PlanFinished: time.Now(), PlanExitCode: tfexec.PlanClean, Fingerprint: "f1"}
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseDone, Record: rec})
+	if m.nNeedPlan != 0 {
+		t.Errorf("nNeedPlan = %d after a clean plan, want 0", m.nNeedPlan)
+	}
+	m.Update(fingerprintMsg{modulePath: mod.Path, fingerprint: "f2"})
+	if m.nNeedPlan != 1 {
+		t.Errorf("nNeedPlan = %d after the module changed, want 1", m.nNeedPlan)
+	}
+	m.Update(fingerprintMsg{modulePath: mod.Path, fingerprint: "f1"})
+	rec = &state.RunRecord{ModulePath: mod.Path, Workspace: "prod", PlanFinished: time.Now(), PlanExitCode: tfexec.PlanChanges, Fingerprint: "f1"}
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: key, ModulePath: mod.Path, Phase: runner.PhaseDone, Record: rec})
+	if m.nNeedPlan != 0 {
+		t.Errorf("nNeedPlan = %d with a ready plan, want 0", m.nNeedPlan)
+	}
+	m.cursor = 2
+	keyPress(m, "d")
+	if m.nNeedPlan != 1 {
+		t.Errorf("nNeedPlan = %d after discarding the plan, want 1", m.nNeedPlan)
+	}
+}
+
 func TestStaleBadge(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")

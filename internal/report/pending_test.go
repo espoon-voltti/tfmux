@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
-package main
+package report
 
 import (
 	"context"
@@ -94,7 +94,7 @@ func TestPendingReport(t *testing.T) {
 	}
 	ignore := state.Ignore{modPath + "//hidden": true}
 
-	rows, notes := pendingReport(store, ignore, repos, false)
+	rows, notes := Pending(store, ignore, repos, false)
 	if len(notes) != 0 {
 		t.Errorf("unexpected notes: %v", notes)
 	}
@@ -112,7 +112,7 @@ func TestPendingReport(t *testing.T) {
 		}
 	}
 
-	rows, _ = pendingReport(store, ignore, repos, true)
+	rows, _ = Pending(store, ignore, repos, true)
 	for _, r := range rows {
 		if r.Workspace == "ready" {
 			t.Error("--needs-plan must drop a plan that is ready to apply")
@@ -120,7 +120,7 @@ func TestPendingReport(t *testing.T) {
 	}
 
 	var out strings.Builder
-	printPending(&out, rows, time.Now())
+	PrintPending(&out, rows, time.Now())
 	text := out.String()
 	if !strings.Contains(text, "repo1") || !strings.Contains(text, "envs/prod") || !strings.Contains(text, "module changed since plan") {
 		t.Errorf("text output:\n%s", text)
@@ -134,7 +134,7 @@ func TestPendingReportNotesUnknownWorkspaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, notes := pendingReport(state.New(t.TempDir()), state.Ignore{}, repos, false)
+	rows, notes := Pending(state.New(t.TempDir()), state.Ignore{}, repos, false)
 	if len(rows) != 0 || len(notes) != 1 || !strings.Contains(notes[0], "workspaces unknown") {
 		t.Errorf("rows=%v notes=%v", rows, notes)
 	}
@@ -181,27 +181,27 @@ module "waf" {
 	}
 	cfg := config.Default()
 	cfg.Roots = []string{root}
-	repos, err := discoverWithGit(context.Background(), cfg)
+	repos, err := DiscoverWithGit(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	rows, _ := pendingReport(store, state.Ignore{}, repos, false)
+	rows, _ := Pending(store, state.Ignore{}, repos, false)
 	if len(rows) != 1 || rows[0].Workspace != "" || rows[0].Reasons[0].Code != attention.ModuleBehind || rows[0].Reasons[0].Detail != "waf v1→v2 (via waf)" {
 		t.Fatalf("rows = %+v", rows)
 	}
 	var out strings.Builder
-	printPending(&out, rows, time.Now())
+	PrintPending(&out, rows, time.Now())
 	if !strings.Contains(out.String(), "terraform/app  -  module-behind") {
 		t.Errorf("text:\n%s", out.String())
 	}
-	if rows, _ := pendingReport(store, state.Ignore{}, repos, true); len(rows) != 0 {
+	if rows, _ := Pending(store, state.Ignore{}, repos, true); len(rows) != 0 {
 		t.Errorf("--needs-plan should drop module rows, got %+v", rows)
 	}
 
-	mods, _, behind := depsReport(state.Ignore{}, repos)
+	mods, _, behind := Deps(state.Ignore{}, repos)
 	out.Reset()
-	printDepsForward(&out, mods, behind, "app-infra")
+	PrintDepsForward(&out, mods, behind, "app-infra")
 	if !strings.Contains(out.String(), "@v1  (via waf)  behind: v1→v2") {
 		t.Errorf("deps forward:\n%s", out.String())
 	}

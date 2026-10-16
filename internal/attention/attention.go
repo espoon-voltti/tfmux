@@ -134,3 +134,22 @@ func Module(d *domain.Deps, behind map[string]deps.Behind) []Reason {
 	}
 	return rs
 }
+
+// ApplyBlocker reports why a workspace's saved plan can't be applied right
+// now, or "" when it can: a plan with outstanding changes, its file on disk,
+// nothing in flight for the workspace, and not stale.
+func ApplyBlocker(rec *state.RunRecord, planFile, planRunning, applyRunning bool, fingerprint string) string {
+	switch {
+	case planRunning:
+		return "plan still running"
+	case rec == nil || rec.PlanExitCode != tfexec.PlanChanges:
+		return "nothing to apply — run a plan with changes first"
+	case !planFile:
+		return "plan file expired or discarded — re-plan first"
+	case applyRunning:
+		return "apply already queued/running — press enter to attach"
+	case Stale(Assess(rec, planFile, fingerprint)):
+		return "plan is STALE (module or upstream state changed since plan) — re-plan, or attach and apply manually"
+	}
+	return ""
+}

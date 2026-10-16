@@ -182,3 +182,27 @@ func TestCreateRefusesExistingFile(t *testing.T) {
 		t.Errorf("existing file was modified: %q", got)
 	}
 }
+
+func TestMCPConfig(t *testing.T) {
+	cfg := Default()
+	if cfg.MCP.Listen != "127.0.0.1:7411" || cfg.MCP.AllTools() {
+		t.Errorf("defaults: %+v", cfg.MCP)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("roots = ['/x']\n[mcp]\ntools = 'all'\nlisten = '127.0.0.1:9000'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MCP.AllTools() || cfg.MCP.Listen != "127.0.0.1:9000" {
+		t.Errorf("loaded: %+v", cfg.MCP)
+	}
+	if err := os.WriteFile(path, []byte("roots = ['/x']\n[mcp]\ntools = 'some'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Error("invalid mcp.tools accepted")
+	}
+}

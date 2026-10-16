@@ -9,6 +9,7 @@
 //
 //	$STATE/tfmux/
 //	├── ignore.json
+//	├── mcp.token                bearer token `tfmux mcp` requires (0600)
 //	└── modules/<sha256(absModulePath)[:16]>/
 //	    ├── module.json              back-reference for debugging/GC
 //	    ├── lock                     flock'd to serialize work across instances
@@ -27,6 +28,7 @@
 package state
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -35,6 +37,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/espoon-voltti/tfmux/internal/domain"
@@ -393,6 +396,32 @@ func (s *Store) GC() (int, error) {
 		}
 	}
 	return pruned, nil
+}
+
+// MCPToken returns the bearer token `tfmux mcp` requires, creating it on
+// first use (32 random bytes, hex, 0600). It never rotates on its own, so a
+// client configured once keeps working.
+func (s *Store) MCPToken() (string, error) {
+	path := filepath.Join(s.Dir, "mcp.token")
+	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		return strings.TrimSpace(string(data)), nil
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(raw)
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return "", err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(token+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 // --- ignore list ---

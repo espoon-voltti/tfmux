@@ -342,3 +342,22 @@ func MapWorkspace(rs domain.RemoteStateRef, ws string) (target string, known boo
 		return "", false
 	}
 }
+
+// ReadsWorkspace reports whether down, run in workspace ws, reads workspace
+// target of up's state through any of its remote-state blocks. An
+// unresolvable workspace expression counts as reading every workspace.
+func ReadsWorkspace(down, up *domain.Module, ws, target string) bool {
+	if down.Deps == nil || up.Deps == nil || up.Deps.Backend == nil {
+		return false
+	}
+	for _, rs := range down.Deps.RemoteStates {
+		if !up.Deps.Backend.SameState(rs.StateAddress) {
+			continue
+		}
+		mapped, known := MapWorkspace(rs, ws)
+		if !known || mapped == target {
+			return true
+		}
+	}
+	return false
+}

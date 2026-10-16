@@ -29,6 +29,15 @@ plan_ttl = "24h"
 # to override detection.
 #init_parallelism = 0
 
+# `tfmux mcp`: the MCP server for an agent running elsewhere (e.g. inside a
+# sandbox without credentials). tools = "read-only" exposes inspection plus
+# plan/output/workspace enumeration; "all" adds apply, init -upgrade and
+# discard. The HTTP endpoint needs a bearer token (see `tfmux mcp
+# --print-config`) and should stay on loopback.
+#[mcp]
+#listen = "127.0.0.1:7411"
+#tools = "read-only"
+
 # Per-repo overrides, keyed by repo path.
 #[repos."~/work/iac/legacy-repo"]
 #terraform_bin = "terraform-0.13"

@@ -75,6 +75,9 @@ error. `--needs-plan` keeps only the rows whose next step is a plan. It reads
 the same run records and workspace caches as the TUI, so a module whose
 workspaces the TUI has never listed is reported on stderr instead.
 
+`tfmux mcp` serves all of the above (and optionally apply) to an agent over
+MCP; see [MCP server](#mcp-server).
+
 `tfmux deps [--reverse] [--json] [FILTER]` prints what each root module
 depends on, or with `--reverse` who depends on each shared thing — so
 `tfmux deps --reverse evaka-infra-shared//modules/waf` answers "which roots
@@ -256,6 +259,39 @@ environment is instead a separate backend picked with `-backend-config`, a
   (`init.workspace` in the module's state dir) and re-runs `init` before a
   plan, output or apply for a different workspace — an apply does so inside
   its tmux window, before `terraform apply`.
+
+## MCP server
+
+`tfmux mcp` serves tfmux's knowledge and actions to an agent that must not
+hold your credentials — typically a coding agent inside a sandbox (the
+author's is [nono](https://github.com/always-further/nono)) with no AWS
+access and no view of tfmux's config or state. tfmux runs outside with
+everything; the agent gets tools.
+
+- **Read-only by default**: `list`, `pending`, `deps`, `plan_log`, plus
+  `plan`, `output`, `enumerate_workspaces` and `refresh`. The last four run
+  terraform on the host, with your credentials, but change nothing; plans
+  are saved for you to apply in the TUI. Plan JSON and plan files are never
+  exposed, only terraform's text output (sensitive values stay redacted).
+- **`--all`** (or `tools = "all"` under `[mcp]` in the config) adds `apply`,
+  `init_upgrade` and `discard_plan`. `apply` has the same gate as `A` in the
+  TUI and runs in the same tmux session.
+- **Transport**: Streamable HTTP on `127.0.0.1:7411` (`listen` in config,
+  `--listen` to override) behind a bearer token stored 0600 in the state dir.
+  `--no-auth` is accepted on loopback only. `--stdio` serves a client on the
+  same machine that spawns the server itself. Every tool call is logged to
+  stderr.
+
+Setup for Claude Code in a sandbox:
+
+```sh
+tfmux mcp --print-config          # prints the `claude mcp add …` line
+claude mcp add -s user --transport http tfmux http://127.0.0.1:7411/mcp --header "Authorization: Bearer …"
+tfmux mcp                         # leave running; the sandboxed agent connects over loopback
+```
+
+The TUI and `tfmux mcp` can run side by side: both persist to the same state
+dir and serialize work per module with a lock.
 
 ## Dependencies
 
