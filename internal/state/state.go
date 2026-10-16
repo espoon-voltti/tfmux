@@ -64,6 +64,13 @@ type ApplyRecord struct {
 	Aborted  bool       `json:"aborted,omitempty"`   // window vanished without exit file
 }
 
+// Invalidation records the upstream apply that made a plan's remote-state
+// reads stale.
+type Invalidation struct {
+	By string    `json:"by"` // "repo/module//workspace" that was applied
+	At time.Time `json:"at"`
+}
+
 // RunRecord is the persisted outcome of the latest plan (and its apply) for
 // one workspace.
 type RunRecord struct {
@@ -80,6 +87,15 @@ type RunRecord struct {
 	PlanErrorKind string `json:"plan_error_kind,omitempty"`
 
 	Summary ChangeSummary `json:"summary"`
+
+	// OutputsChanged reports that the plan changes at least one output, so
+	// applying it changes what downstream roots read via remote state.
+	OutputsChanged bool `json:"outputs_changed,omitempty"`
+
+	// Invalidated is set when an upstream state this plan read through
+	// terraform_remote_state was applied after the plan was taken. A new
+	// plan replaces the record and so clears it.
+	Invalidated *Invalidation `json:"invalidated,omitempty"`
 
 	// Fingerprint is the module content the plan was taken against (see
 	// gitstatus.Fingerprint). Empty in records written before it existed.

@@ -21,13 +21,12 @@ import (
 // prints them: the scanned Deps plus each remote state resolved to the root
 // module holding it, when one is discovered.
 type depsModule struct {
-	Repo      string         `json:"repo"`
-	Module    string         `json:"module"`
-	Path      string         `json:"path"`
-	Deps      *domain.Deps   `json:"deps"`
-	Upstreams []depsUpstream `json:"upstreams,omitempty"`
-	Hidden    bool           `json:"-"`
-	mod       *domain.Module
+	Repo      string                 `json:"repo"`
+	Module    string                 `json:"module"`
+	Path      string                 `json:"path"`
+	Deps      *domain.Deps           `json:"deps"`
+	Upstreams []depsUpstream         `json:"upstreams,omitempty"`
+	Behind    map[string]deps.Behind `json:"behind,omitempty"` // deps.RefKey -> comparison, for pins of repos checked out locally
 }
 
 type depsUpstream struct {
@@ -37,27 +36,27 @@ type depsUpstream struct {
 }
 
 // depsReport lists the visible root modules with their dependencies, and the
-// index for reverse lookups over the same set.
-func depsReport(ignore state.Ignore, repos []*domain.Repo) ([]depsModule, *deps.Index) {
-	var visible []*domain.Repo
-	for _, repo := range repos {
-		r := *repo
-		r.Modules = nil
-		for _, mod := range repo.Modules {
-			if !ignore.HidesModule(mod) {
-				r.Modules = append(r.Modules, mod)
-			}
-		}
-		visible = append(visible, &r)
-	}
+// index for reverse lookups over the same set. Pins of git modules whose
+// repo is checked out under the roots are compared against that checkout.
+func depsReport(ignore state.Ignore, repos []*domain.Repo) ([]depsModule, *deps.Index, map[string]deps.Behind) {
+	visible := visibleRepos(ignore, repos)
 	ix := deps.Build(visible)
+	behind := checkPins(context.Background(), visible, ix)
 	var out []depsModule
 	for _, repo := range visible {
 		for _, mod := range repo.Modules {
 			if mod.Deps == nil {
 				continue
 			}
-			dm := depsModule{Repo: repo.Name, Module: mod.RelPath, Path: mod.Path, Deps: mod.Deps, mod: mod}
+			dm := depsModule{Repo: repo.Name, Module: mod.RelPath, Path: mod.Path, Deps: mod.Deps}
+			for _, g := range mod.Deps.Git {
+				if b, ok := behind[deps.RefKey(g)]; ok {
+					if dm.Behind == nil {
+						dm.Behind = map[string]deps.Behind{}
+					}
+					dm.Behind[deps.RefKey(g)] = b
+				}
+			}
 			for _, rs := range mod.Deps.RemoteStates {
 				up := depsUpstream{RemoteState: rs.Name}
 				if upstream := ix.Upstream(rs); upstream != nil {
@@ -68,12 +67,20 @@ func depsReport(ignore state.Ignore, repos []*domain.Repo) ([]depsModule, *deps.
 			out = append(out, dm)
 		}
 	}
-	return out, ix
+	return out, ix, behind
+}
+
+// behindNote renders the comparison for one pin as a line suffix, or "".
+func behindNote(behind map[string]deps.Behind, g domain.GitRef) string {
+	if b, ok := behind[deps.RefKey(g)]; ok && b.Any() {
+		return "  behind: " + b.String()
+	}
+	return ""
 }
 
 func moduleLabel(mod *domain.Module) string { return mod.Repo.Name + "/" + mod.RelPath }
 
-func printDepsForward(out io.Writer, mods []depsModule, filter string) {
+func printDepsForward(out io.Writer, mods []depsModule, behind map[string]deps.Behind, filter string) {
 	for _, dm := range mods {
 		label := dm.Repo + "/" + dm.Module
 		if filter != "" && !strings.Contains(label, filter) {
@@ -85,7 +92,7 @@ func printDepsForward(out io.Writer, mods []depsModule, filter string) {
 			if ref == "" {
 				ref = "(unpinned)"
 			}
-			fmt.Fprintf(out, "  git     %s @%s  (via %s)\n", g.Key(), ref, g.Via)
+			fmt.Fprintf(out, "  git     %s @%s  (via %s)%s\n", g.Key(), ref, g.Via, behindNote(behind, g))
 		}
 		for _, l := range dm.Deps.Local {
 			where := l.RelPath
@@ -119,7 +126,7 @@ func describeWorkspace(rs domain.RemoteStateRef) string {
 
 // printDepsReverse lists, for every git module and remote state in use, the
 // root modules depending on it. filter substring-matches the key.
-func printDepsReverse(out io.Writer, ix *deps.Index, filter string) {
+func printDepsReverse(out io.Writer, ix *deps.Index, behind map[string]deps.Behind, filter string) {
 	for _, key := range ix.GitKeys() {
 		if filter != "" && !strings.Contains(key, filter) {
 			continue
@@ -128,7 +135,7 @@ func printDepsReverse(out io.Writer, ix *deps.Index, filter string) {
 		for _, mod := range ix.DependentsOfGit(key) {
 			for _, g := range mod.Deps.Git {
 				if g.Key() == key {
-					fmt.Fprintf(out, "  %s @%s  (via %s)\n", moduleLabel(mod), g.Ref, g.Via)
+					fmt.Fprintf(out, "  %s @%s  (via %s)%s\n", moduleLabel(mod), g.Ref, g.Via, behindNote(behind, g))
 				}
 			}
 		}
@@ -178,7 +185,7 @@ func runDeps(args []string) error {
 	if err != nil {
 		return err
 	}
-	mods, ix := depsReport(ignore, repos)
+	mods, ix, behind := depsReport(ignore, repos)
 	for _, dm := range mods {
 		for _, e := range dm.Deps.Errors {
 			fmt.Fprintf(os.Stderr, "tfmux: %s/%s: %s\n", dm.Repo, dm.Module, e)
@@ -193,9 +200,9 @@ func runDeps(args []string) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(mods)
 	case reverse:
-		printDepsReverse(os.Stdout, ix, filter)
+		printDepsReverse(os.Stdout, ix, behind, filter)
 	default:
-		printDepsForward(os.Stdout, mods, filter)
+		printDepsForward(os.Stdout, mods, behind, filter)
 	}
 	return nil
 }

@@ -35,7 +35,9 @@ tfmux
   changes (`● +2 ~1 -0`), plan errors, apply progress/result. A `STALE`
   badge on a saved plan, or `needs plan` on a clean one, means the module's
   content (committed or not) changed after the plan was taken; the title bar
-  counts how many workspaces need a plan.
+  counts how many workspaces need a plan. A module row shows `↑ waf v16→v18`
+  when a git module it pins has newer content in that shared repo's local
+  checkout, and the title bar counts modules behind.
 - **Bulk plans**: `p` plans the selection (workspace, module, repo or marked
   set), `P` plans everything visible. Plans run headless with bounded
   parallelism (`terraform plan -detailed-exitcode -out=…`); same-module jobs
@@ -76,7 +78,8 @@ workspaces the TUI has never listed is reported on stderr instead.
 `tfmux deps [--reverse] [--json] [FILTER]` prints what each root module
 depends on, or with `--reverse` who depends on each shared thing — so
 `tfmux deps --reverse evaka-infra-shared//modules/waf` answers "which roots
-use waf, at which ref". See [Dependencies](#dependencies).
+use waf, at which ref, and how far behind the checkout". `pending` lists the
+same behind pins as `module-behind` rows. See [Dependencies](#dependencies).
 
 ## Keys
 
@@ -157,6 +160,22 @@ use waf, at which ref". See [Dependencies](#dependencies).
   the modules it touched. Fingerprints are refreshed on discovery, after each
   plan and on `r` — press `r` after pulling. Plans recorded by tfmux versions
   without fingerprints show as needing a plan once.
+- **Pinned git modules are compared against the shared repo's checkout.**
+  When a root pins `…//modules/waf?ref=v16` and the repo it names is checked
+  out under the roots (matched by its `origin` URL), tfmux compares the
+  module's tree at `v16` with the newest tag, with `HEAD` and with the working
+  tree, and badges the root `↑ waf v16→v18`, `unreleased` or `uncommitted`.
+  tfmux never fetches: `git fetch --tags` the shared repo first. A ref that
+  isn't present locally shows as `ref not found locally`. Checked on
+  discovery and on `r`.
+- **Applying an upstream root marks its downstream roots.** A plan records
+  whether it changes outputs. When such a plan is applied, every planned
+  workspace of a root that reads that state via `terraform_remote_state` (in
+  the workspace the expression maps to, or every workspace when it can't be
+  resolved) is marked `needs plan`, and its saved plan file, which embeds the
+  old remote-state values, is refused for apply until re-planned. One hop
+  only, so roots reading each other's state can't loop. Only applies this
+  tfmux watched count: a colleague's apply is invisible until you plan.
 - **Plan files contain secrets.** They live under `~/.local/state/tfmux`
   with 0700/0600 permissions and are deleted after a successful apply, on
   discard, and after `plan_ttl` (default 24h).

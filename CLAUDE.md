@@ -99,6 +99,10 @@ consequences:
   workspace the dir is initialised for; plan/output/apply re-init on mismatch.
 - **Plan files contain secrets:** stored under the XDG state dir with 0700/0600
   perms, deleted after a successful apply, on discard, and after `plan_ttl`.
+- **Dependency walks are one hop.** Root modules in the wild read each other's
+  state in cycles. `deps.Index` holds direct edges; downstream invalidation
+  after an apply marks direct dependents and stops. Anything transitive needs
+  a visited set.
 - **Version guard:** plan files aren't portable across terraform/tofu versions;
   apply refuses a different binary than the one used at plan time.
 

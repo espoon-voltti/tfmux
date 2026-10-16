@@ -300,3 +300,22 @@ module "waf" {
 		t.Errorf("state keys = %v", addrs)
 	}
 }
+
+func TestMapWorkspace(t *testing.T) {
+	cases := []struct {
+		rs    domain.RemoteStateRef
+		want  string
+		known bool
+	}{
+		{domain.RemoteStateRef{WorkspaceKind: domain.WorkspaceSame}, "prod", true},
+		{domain.RemoteStateRef{WorkspaceKind: domain.WorkspaceLiteral, WorkspaceExpr: "backup"}, "backup", true},
+		{domain.RemoteStateRef{WorkspaceKind: domain.WorkspaceTemplate, WorkspaceExpr: `"common-${terraform.workspace}"`}, "common-prod", true},
+		{domain.RemoteStateRef{WorkspaceKind: domain.WorkspaceUnknown, WorkspaceExpr: "local.x"}, "", false},
+	}
+	for _, c := range cases {
+		got, known := MapWorkspace(c.rs, "prod")
+		if got != c.want || known != c.known {
+			t.Errorf("%+v: got %q,%v want %q,%v", c.rs, got, known, c.want, c.known)
+		}
+	}
+}

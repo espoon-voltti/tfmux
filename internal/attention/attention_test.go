@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/espoon-voltti/tfmux/internal/deps"
+	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/tfexec"
 )
@@ -44,6 +46,8 @@ func TestAssess(t *testing.T) {
 		{"applied", &state.RunRecord{PlanExitCode: tfexec.PlanChanges, Fingerprint: fp, Apply: &state.ApplyRecord{ExitCode: intp(0)}}, false, fp, nil, false},
 		{"applied then changed", &state.RunRecord{PlanExitCode: tfexec.PlanChanges, Fingerprint: fp, Apply: &state.ApplyRecord{ExitCode: intp(0)}}, false, "other|x", []Code{Changed}, true},
 		{"apply failed, plan kept", &state.RunRecord{PlanExitCode: tfexec.PlanChanges, Fingerprint: fp, Apply: &state.ApplyRecord{ExitCode: intp(1)}}, true, fp, []Code{ApplyFailed, Ready}, false},
+		{"clean, upstream applied", &state.RunRecord{PlanExitCode: tfexec.PlanClean, Fingerprint: fp, Invalidated: &state.Invalidation{By: "x/base//prod"}}, false, fp, []Code{UpstreamApplied}, true},
+		{"ready but upstream applied", &state.RunRecord{PlanExitCode: tfexec.PlanChanges, Fingerprint: fp, Invalidated: &state.Invalidation{By: "x/base//prod"}}, true, fp, []Code{UpstreamApplied}, true},
 		{"apply aborted", &state.RunRecord{PlanExitCode: tfexec.PlanChanges, Fingerprint: fp, Apply: &state.ApplyRecord{Aborted: true}}, false, fp, []Code{ApplyAborted, Expired}, true},
 	}
 	for _, c := range cases {
@@ -64,5 +68,24 @@ func TestReadyCarriesSummary(t *testing.T) {
 	got := Assess(rec, true, "f")
 	if len(got) != 1 || got[0].Detail != "+2 ~1 -0" {
 		t.Errorf("got %+v", got)
+	}
+}
+
+func TestModuleBehind(t *testing.T) {
+	d := &domain.Deps{Git: []domain.GitRef{
+		{Repo: "github.com/org/shared", Subdir: "modules/waf", Ref: "v16", Via: "waf"},
+		{Repo: "github.com/org/shared", Subdir: "modules/s3", Ref: "v1", Via: "bucket"},
+		{Repo: "github.com/org/other", Subdir: "x", Ref: "v1", Via: "x"},
+	}}
+	behind := map[string]deps.Behind{
+		"github.com/org/shared//modules/waf@v16": {Ref: "v16", NewerTag: "v18"},
+		"github.com/org/shared//modules/s3@v1":   {Ref: "v1"},
+	}
+	got := Module(d, behind)
+	if len(got) != 1 || got[0].Code != ModuleBehind || got[0].Detail != "waf v16→v18 (via waf)" {
+		t.Errorf("got %+v", got)
+	}
+	if Module(nil, behind) != nil {
+		t.Error("nil deps should yield nothing")
 	}
 }

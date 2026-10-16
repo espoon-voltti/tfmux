@@ -34,3 +34,13 @@ func summarize(plan *tfjson.Plan) state.ChangeSummary {
 	}
 	return s
 }
+
+// outputsChanged reports whether the plan changes any output value.
+func outputsChanged(plan *tfjson.Plan) bool {
+	for _, c := range plan.OutputChanges {
+		if c != nil && !c.Actions.NoOp() {
+			return true
+		}
+	}
+	return false
+}

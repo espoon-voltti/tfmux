@@ -262,8 +262,29 @@ func (m *Model) renderModuleRow(mod *domain.Module) string {
 		s += styleDim.Render("…")
 	case mod.WorkspaceState == domain.WorkspacesError:
 		s += styleError.Render("✗ " + firstLine(mod.WorkspaceErr))
+	default:
+		if behind := attention.Module(mod.Deps, m.behind); len(behind) > 0 {
+			s += styleStale.Render("↑ " + behindSummary(behind))
+		}
 	}
 	return s
+}
+
+// behindSummary names the first two behind pins and counts the rest.
+func behindSummary(rs []attention.Reason) string {
+	var parts []string
+	for i, r := range rs {
+		if i == 2 {
+			parts = append(parts, fmt.Sprintf("+%d more", len(rs)-2))
+			break
+		}
+		detail := r.Detail
+		if i := strings.Index(detail, " (via "); i >= 0 {
+			detail = detail[:i]
+		}
+		parts = append(parts, detail)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // taskBadge renders an in-flight task's status cell: an animated spinner with

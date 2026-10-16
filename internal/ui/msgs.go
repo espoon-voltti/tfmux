@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/espoon-voltti/tfmux/internal/deps"
 	"github.com/espoon-voltti/tfmux/internal/discovery"
 	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/gitstatus"
@@ -175,5 +176,19 @@ func expirePlansCmd(store *state.Store, ttl time.Duration, gen int) tea.Cmd {
 		n, _ := store.ExpirePlans(ttl)
 		_, _ = store.GC()
 		return expiredPlansMsg{n: n, gen: gen}
+	}
+}
+
+// behindMsg carries, for one shared repo's checkout, how every pin of its
+// modules compares (keyed by deps.RefKey).
+type behindMsg struct {
+	repoPath string
+	behind   map[string]deps.Behind
+	gen      int // refresh generation; 0 for non-refresh callers
+}
+
+func behindCmd(repoPath string, refs []domain.GitRef, gen int) tea.Cmd {
+	return func() tea.Msg {
+		return behindMsg{repoPath: repoPath, behind: deps.CheckRefs(context.Background(), repoPath, refs), gen: gen}
 	}
 }

@@ -50,13 +50,13 @@ module "waf" {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mods, ix := depsReport(state.Ignore{}, repos)
+	mods, ix, behind := depsReport(state.Ignore{}, repos)
 	if len(mods) != 2 {
 		t.Fatalf("modules = %+v", mods)
 	}
 
 	var fwd strings.Builder
-	printDepsForward(&fwd, mods, "app-infra")
+	printDepsForward(&fwd, mods, behind, "app-infra")
 	if !strings.Contains(fwd.String(), "state   base-infra/terraform/base  (base, workspace: same)") {
 		t.Errorf("forward output should resolve the upstream root module:\n%s", fwd.String())
 	}
@@ -65,7 +65,7 @@ module "waf" {
 	}
 
 	var rev strings.Builder
-	printDepsReverse(&rev, ix, "shared//modules/waf")
+	printDepsReverse(&rev, ix, behind, "shared//modules/waf")
 	got := rev.String()
 	if !strings.Contains(got, "github.com/org/shared//modules/waf\n") ||
 		!strings.Contains(got, "app-infra/terraform/app @v18") ||
@@ -77,7 +77,7 @@ module "waf" {
 	}
 
 	rev.Reset()
-	printDepsReverse(&rev, ix, "s3://b/k")
+	printDepsReverse(&rev, ix, behind, "s3://b/k")
 	if !strings.Contains(rev.String(), "app-infra/terraform/app  (base, workspace: same)") {
 		t.Errorf("reverse state output:\n%s", rev.String())
 	}

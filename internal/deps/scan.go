@@ -157,18 +157,28 @@ func ParseGitSource(source string) (domain.GitRef, bool) {
 		ref.Subdir = strings.Trim(rest[i+2:], "/")
 		rest = rest[:i]
 	}
-	rest = strings.TrimPrefix(rest, "git@")
+	ref.Repo = NormalizeRepoURL(rest)
+	return ref, ref.Repo != ""
+}
+
+// NormalizeRepoURL reduces the URL forms git accepts for one repository to
+// "host/org/name", so module sources and `git remote get-url` output can be
+// compared: scheme, user, scp-style colon, ".git" and trailing slashes are
+// dropped.
+func NormalizeRepoURL(url string) string {
+	rest := strings.TrimPrefix(url, "git::")
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
 	if i := strings.IndexByte(rest, '@'); i >= 0 && i < strings.IndexByte(rest+"/", '/') {
-		rest = rest[i+1:] // user@host
+		rest = rest[i+1:]
 	}
 	if slash := strings.IndexByte(rest, '/'); slash > 0 {
 		if colon := strings.IndexByte(rest[:slash], ':'); colon >= 0 {
-			rest = rest[:colon] + "/" + rest[colon+1:] // scp-style host:path
+			rest = rest[:colon] + "/" + rest[colon+1:]
 		}
 	}
-	rest = strings.TrimSuffix(strings.TrimSuffix(rest, "/"), ".git")
-	ref.Repo = rest
-	return ref, ref.Repo != ""
+	return strings.TrimSuffix(strings.TrimSuffix(rest, "/"), ".git")
 }
 
 func looksLikeGit(s string) bool {
@@ -315,4 +325,20 @@ func literalString(expr hcl.Expression) (string, bool) {
 		return "", false
 	}
 	return v.AsString(), true
+}
+
+// MapWorkspace returns which upstream workspace rs reads when the downstream
+// root runs in workspace ws. known is false when the expression depends on
+// something other than terraform.workspace, meaning it could be any.
+func MapWorkspace(rs domain.RemoteStateRef, ws string) (target string, known bool) {
+	switch rs.WorkspaceKind {
+	case domain.WorkspaceSame:
+		return ws, true
+	case domain.WorkspaceLiteral:
+		return rs.WorkspaceExpr, true
+	case domain.WorkspaceTemplate:
+		return EvalWorkspace(rs.WorkspaceExpr, ws)
+	default:
+		return "", false
+	}
 }

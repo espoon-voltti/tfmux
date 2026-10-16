@@ -5,6 +5,7 @@
 package runner
 
 import (
+	tfjson "github.com/hashicorp/terraform-json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,7 +135,8 @@ func TestPlanPersistsRecordAndPlanFile(t *testing.T) {
 		{"address":"a","change":{"actions":["create"]}},
 		{"address":"b","change":{"actions":["delete","create"]}},
 		{"address":"c","change":{"actions":["update"]}},
-		{"address":"d","change":{"actions":["no-op"]}}]}`
+		{"address":"d","change":{"actions":["no-op"]}}],
+		"output_changes":{"kept":{"actions":["no-op"]},"url":{"actions":["update"]}}}`
 	if err := os.WriteFile(showJSON, []byte(plan), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +160,9 @@ func TestPlanPersistsRecordAndPlanFile(t *testing.T) {
 	}
 	if rec.TFBinVersion != "1.9.9" {
 		t.Errorf("version = %q", rec.TFBinVersion)
+	}
+	if !rec.OutputsChanged {
+		t.Error("an updated output should be recorded as OutputsChanged")
 	}
 	if !f.store.HasPlanFile(m.Path, "prod") {
 		t.Error("plan file missing")
@@ -683,5 +688,19 @@ func TestFailedLazyInitCancelsDeferredPlan(t *testing.T) {
 	}
 	if ev := waitTerminal(t, f.runner.Events, KindPlan, 1)[0]; ev.Phase != PhaseCanceled {
 		t.Errorf("plan: phase = %v, err = %q", ev.Phase, ev.Err)
+	}
+}
+
+func TestOutputsChangedIgnoresNoOps(t *testing.T) {
+	plan := &tfjson.Plan{OutputChanges: map[string]*tfjson.Change{
+		"a": {Actions: tfjson.Actions{tfjson.ActionNoop}},
+		"b": nil,
+	}}
+	if outputsChanged(plan) {
+		t.Error("no-op outputs are not changes")
+	}
+	plan.OutputChanges["c"] = &tfjson.Change{Actions: tfjson.Actions{tfjson.ActionCreate}}
+	if !outputsChanged(plan) {
+		t.Error("a created output is a change")
 	}
 }

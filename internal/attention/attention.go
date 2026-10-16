@@ -10,7 +10,10 @@ package attention
 
 import (
 	"fmt"
+	"path"
 
+	"github.com/espoon-voltti/tfmux/internal/deps"
+	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/tfexec"
 )
@@ -27,6 +30,9 @@ const (
 	Expired      Code = "plan-expired" // the last plan had changes but its file is gone
 	ApplyFailed  Code = "apply-failed" // the last apply exited non-zero
 	ApplyAborted Code = "apply-aborted"
+	// UpstreamApplied: a remote state this plan read was applied after the
+	// plan was taken, so the plan carries stale values.
+	UpstreamApplied Code = "upstream-applied"
 )
 
 // Reason is one Code with a human detail, e.g. the change summary for Ready.
@@ -58,6 +64,9 @@ func Assess(rec *state.RunRecord, planFile bool, fingerprint string) []Reason {
 	if rec.PlanExitCode == tfexec.PlanError {
 		rs = append(rs, Reason{Code: PlanError, Detail: rec.PlanErrorKind})
 	}
+	if rec.Invalidated != nil {
+		rs = append(rs, Reason{Code: UpstreamApplied, Detail: "upstream " + rec.Invalidated.By + " applied since plan"})
+	}
 	if fingerprint != "" {
 		switch {
 		case rec.Fingerprint == "":
@@ -70,7 +79,7 @@ func Assess(rec *state.RunRecord, planFile bool, fingerprint string) []Reason {
 		switch {
 		case !planFile:
 			rs = append(rs, Reason{Code: Expired, Detail: "plan file expired or discarded"})
-		case !Has(rs, Changed) && !Has(rs, Unknown):
+		case !Stale(rs):
 			rs = append(rs, Reason{Code: Ready, Detail: rec.Summary.String()})
 		}
 	}
@@ -92,13 +101,36 @@ func Has(rs []Reason, code Code) bool {
 func NeedsPlan(rs []Reason) bool {
 	for _, r := range rs {
 		switch r.Code {
-		case Unplanned, Changed, Unknown, Expired, ApplyAborted:
+		case Unplanned, Changed, Unknown, Expired, ApplyAborted, UpstreamApplied:
 			return true
 		}
 	}
 	return false
 }
 
-// Stale reports whether a saved plan must not be applied because the module
-// content it was taken against is no longer what is on disk.
-func Stale(rs []Reason) bool { return Has(rs, Changed) || Has(rs, Unknown) }
+// Stale reports whether a saved plan must not be applied: the module content
+// it was taken against is no longer what is on disk, or an upstream state it
+// read has changed.
+func Stale(rs []Reason) bool { return Has(rs, Changed) || Has(rs, Unknown) || Has(rs, UpstreamApplied) }
+
+// ModuleBehind is a module-level reason: a git module the root pins has
+// newer content in the shared repo's checkout.
+const ModuleBehind Code = "module-behind"
+
+// Module returns module-level reasons, one ModuleBehind per pinned git ref
+// that is behind. behind is keyed by deps.RefKey; pins absent from it are
+// unknown and yield nothing.
+func Module(d *domain.Deps, behind map[string]deps.Behind) []Reason {
+	if d == nil {
+		return nil
+	}
+	var rs []Reason
+	for _, g := range d.Git {
+		b, ok := behind[deps.RefKey(g)]
+		if !ok || !b.Any() {
+			continue
+		}
+		rs = append(rs, Reason{Code: ModuleBehind, Detail: fmt.Sprintf("%s %s (via %s)", path.Base(g.Subdir), b, g.Via)})
+	}
+	return rs
+}

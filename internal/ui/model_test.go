@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/espoon-voltti/tfmux/internal/config"
+	"github.com/espoon-voltti/tfmux/internal/deps"
 	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/state"
@@ -710,5 +711,161 @@ func TestLegacyRecordNeedsPlan(t *testing.T) {
 	m.reflow()
 	if !strings.Contains(m.View(), "STALE") {
 		t.Error("a record without a fingerprint must not be applyable")
+	}
+}
+
+func TestModuleBehindBadgeAndRefreshJoin(t *testing.T) {
+	m, mod := fixtureModel(t)
+	mod.Deps = &domain.Deps{Git: []domain.GitRef{{Repo: "github.com/org/shared", Subdir: "modules/waf", Ref: "v16", Via: "waf"}}}
+	enumerated(t, m, mod, "prod")
+	shared := &domain.Repo{Path: "/iac/shared", Name: "shared"}
+	m.repos = append(m.repos, shared)
+	m.reflow()
+
+	// The shared repo's git status arrives with a remote the index knows:
+	// a pin check is emitted and a live refresh waits for it.
+	m.refreshGen, m.refreshLeft = 7, 1
+	_, cmd := m.Update(gitStatusMsg{repoPath: shared.Path, status: domain.GitStatus{Branch: "main", RemoteURL: "git@github.com:org/shared.git"}, gen: 7})
+	if cmd == nil {
+		t.Fatal("expected a pin check command")
+	}
+	if m.refreshLeft != 1 {
+		t.Errorf("refreshLeft = %d: the check must replace the git-status slot it was spawned from", m.refreshLeft)
+	}
+	_, cmd = m.Update(gitStatusMsg{repoPath: shared.Path, status: domain.GitStatus{Branch: "main", RemoteURL: "https://github.com/org/unrelated"}, gen: 0})
+	if cmd != nil {
+		t.Error("no pins point at that repo: no command expected")
+	}
+
+	m.Update(behindMsg{repoPath: shared.Path, behind: map[string]deps.Behind{"github.com/org/shared//modules/waf@v16": {Ref: "v16", NewerTag: "v18"}}, gen: 7})
+	v := m.View()
+	if !strings.Contains(v, "↑ waf v16→v18") {
+		t.Errorf("module row should show the behind badge:\n%s", v)
+	}
+	if !strings.Contains(v, "1 modules behind") {
+		t.Errorf("title bar should count it:\n%s", v)
+	}
+	if m.refreshLeft != 0 || m.status != "refreshed" {
+		t.Errorf("refresh should complete after the check: left=%d status=%q", m.refreshLeft, m.status)
+	}
+}
+
+// stateFixture wires base (holding a backend) and service (reading it in
+// three ways) into m, with run records for service's prod and staging.
+func stateFixture(t *testing.T, m *Model, base *domain.Module, unknownMapping bool) (service *domain.Module) {
+	t.Helper()
+	addr := domain.StateAddress{Backend: "s3", Bucket: "tf", Key: "base.tfstate"}
+	base.Deps = &domain.Deps{Backend: &addr}
+	enumerated(t, m, base, "prod", "staging")
+	service = &domain.Module{Repo: base.Repo, Path: "/iac/repo1/envs/service", RelPath: "envs/service", TFBin: "terraform"}
+	kind, expr := domain.WorkspaceSame, ""
+	if unknownMapping {
+		kind, expr = domain.WorkspaceUnknown, "local.x"
+	}
+	service.Deps = &domain.Deps{RemoteStates: []domain.RemoteStateRef{{Name: "base", StateAddress: addr, WorkspaceKind: kind, WorkspaceExpr: expr}}}
+	base.Repo.Modules = append(base.Repo.Modules, service)
+	enumerated(t, m, service, "prod", "staging")
+	for _, ws := range []string{"prod", "staging"} {
+		key := service.Path + "//" + ws
+		m.runs[key] = &state.RunRecord{ModulePath: service.Path, Workspace: ws, PlanFinished: time.Now(), PlanExitCode: tfexec.PlanClean, Fingerprint: "f"}
+	}
+	m.fingerprints[service.Path] = "f"
+	m.reflow()
+	return service
+}
+
+func applied(m *Model, mod *domain.Module, ws string, outputsChanged bool) {
+	key := mod.Path + "//" + ws
+	m.runs[key] = &state.RunRecord{ModulePath: mod.Path, Workspace: ws, PlanExitCode: tfexec.PlanChanges, OutputsChanged: outputsChanged, Apply: &state.ApplyRecord{Started: time.Now()}}
+	exit := 0
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindApply, Key: key, ModulePath: mod.Path, Phase: runner.PhaseDone, ApplyExit: &exit})
+}
+
+func TestUpstreamApplyInvalidatesMappedDownstream(t *testing.T) {
+	m, base := fixtureModel(t)
+	service := stateFixture(t, m, base, false)
+	applied(m, base, "prod", true)
+	if m.runs[service.Path+"//prod"].Invalidated == nil {
+		t.Error("service//prod reads base//prod and should be invalidated")
+	}
+	if m.runs[service.Path+"//staging"].Invalidated != nil {
+		t.Error("service//staging reads base//staging and must be left alone")
+	}
+	if !strings.Contains(m.status, "1 downstream workspace(s) need plan") {
+		t.Errorf("status = %q", m.status)
+	}
+	m.reflow()
+	v := m.View()
+	// 2: service//prod plus base//staging, which was never planned.
+	if !strings.Contains(v, "needs plan") || !strings.Contains(v, "2 need plan") {
+		t.Errorf("downstream should show as needing a plan:\n%s", v)
+	}
+	// Re-applying does not stack a second invalidation.
+	first := m.runs[service.Path+"//prod"].Invalidated
+	applied(m, base, "prod", true)
+	if m.runs[service.Path+"//prod"].Invalidated != first {
+		t.Error("an already-invalidated record must not be re-marked")
+	}
+}
+
+func TestUpstreamApplyUnknownMappingInvalidatesAll(t *testing.T) {
+	m, base := fixtureModel(t)
+	service := stateFixture(t, m, base, true)
+	applied(m, base, "prod", true)
+	for _, ws := range []string{"prod", "staging"} {
+		if m.runs[service.Path+"//"+ws].Invalidated == nil {
+			t.Errorf("service//%s: unresolvable mapping should invalidate every workspace", ws)
+		}
+	}
+}
+
+func TestUpstreamApplyWithoutOutputChangesIsQuiet(t *testing.T) {
+	m, base := fixtureModel(t)
+	service := stateFixture(t, m, base, false)
+	applied(m, base, "prod", false)
+	if m.runs[service.Path+"//prod"].Invalidated != nil {
+		t.Error("no output changed: downstream must not be marked")
+	}
+	if strings.Contains(m.status, "downstream") {
+		t.Errorf("status = %q", m.status)
+	}
+}
+
+func TestInvalidatedPlanIsNotApplyable(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	changedPlan(m, mod, "prod")
+	m.runs[mod.Path+"//prod"].Invalidated = &state.Invalidation{By: "repo1/envs/base//prod", At: time.Now()}
+	m.reflow()
+	keyPress(m, "j")
+	keyPress(m, "j")
+	keyPress(m, "A")
+	if !strings.Contains(m.status, "STALE") {
+		t.Errorf("status = %q", m.status)
+	}
+}
+
+func TestStateCycleTerminates(t *testing.T) {
+	m, a := fixtureModel(t)
+	addrA := domain.StateAddress{Backend: "s3", Bucket: "tf", Key: "a.tfstate"}
+	addrB := domain.StateAddress{Backend: "s3", Bucket: "tf", Key: "b.tfstate"}
+	b := &domain.Module{Repo: a.Repo, Path: "/iac/repo1/envs/b", RelPath: "envs/b", TFBin: "terraform"}
+	a.Deps = &domain.Deps{Backend: &addrA, RemoteStates: []domain.RemoteStateRef{{Name: "b", StateAddress: addrB, WorkspaceKind: domain.WorkspaceSame}}}
+	b.Deps = &domain.Deps{Backend: &addrB, RemoteStates: []domain.RemoteStateRef{{Name: "a", StateAddress: addrA, WorkspaceKind: domain.WorkspaceSame}}}
+	a.Repo.Modules = append(a.Repo.Modules, b)
+	enumerated(t, m, a, "prod")
+	enumerated(t, m, b, "prod")
+	for _, mod := range []*domain.Module{a, b} {
+		m.runs[mod.Path+"//prod"] = &state.RunRecord{ModulePath: mod.Path, Workspace: "prod", PlanExitCode: tfexec.PlanClean, Fingerprint: "f"}
+	}
+	m.reflow()
+	applied(m, a, "prod", true)
+	if m.runs[b.Path+"//prod"].Invalidated == nil {
+		t.Error("b reads a and should be marked")
+	}
+	// a's own record was replaced by the apply fixture; it must not have been
+	// marked by its own apply through b.
+	if m.runs[a.Path+"//prod"].Invalidated != nil {
+		t.Error("propagation must stop after one hop")
 	}
 }

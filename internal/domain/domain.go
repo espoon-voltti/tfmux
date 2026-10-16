@@ -19,7 +19,8 @@ type GitStatus struct {
 	Ahead       int
 	Behind      int
 	HasUpstream bool
-	Err         error // git invocation/parse failure; other fields zero
+	RemoteURL   string // origin remote URL as configured; "" when there is none
+	Err         error  // git invocation/parse failure; other fields zero
 }
 
 // Repo is a git repository discovered under one of the configured roots.

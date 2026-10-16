@@ -28,6 +28,7 @@ import (
 
 	"github.com/espoon-voltti/tfmux/internal/attention"
 	"github.com/espoon-voltti/tfmux/internal/config"
+	"github.com/espoon-voltti/tfmux/internal/deps"
 	"github.com/espoon-voltti/tfmux/internal/discovery"
 	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/gitstatus"
@@ -78,6 +79,8 @@ type Model struct {
 	planFiles    map[string]bool             // workspace key -> plan file on disk
 	tasks        map[string]*taskState       // runner.TaskID -> in-flight task
 	fingerprints map[string]string           // module path -> current git fingerprint
+	index        *deps.Index                 // dependency index over the visible modules, rebuilt in reflow
+	behind       map[string]deps.Behind      // deps.RefKey -> how the pin compares to the shared repo checkout
 
 	rows        []row
 	cursor      int
@@ -94,6 +97,7 @@ type Model struct {
 	// ignore/showIgnored) so View doesn't rescan every frame.
 	nRepos, nModules, nWorkspaces int
 	nNeedPlan                     int // visible workspaces whose next step is a plan
+	nModulesBehind                int // visible modules pinning a git module that is behind its repo checkout
 
 	// refreshGen/refreshLeft join the concurrent git-status/fingerprint/expiry
 	// commands fanned out by refresh() so its completion can be announced.
@@ -151,6 +155,8 @@ func NewModel(cfg *config.Config, store *state.Store) *Model {
 		tasks:        map[string]*taskState{},
 		done:         map[string]*taskState{},
 		fingerprints: map[string]string{},
+		index:        deps.Build(nil),
+		behind:       map[string]deps.Behind{},
 		collapsed:    map[string]bool{},
 		marked:       map[string]bool{},
 		ignore:       state.Ignore{},
@@ -222,11 +228,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateManifestReloaded(msg)
 
 	case gitStatusMsg:
+		var cmd tea.Cmd
 		for _, repo := range m.repos {
 			if repo.Path == msg.repoPath {
 				repo.Git = msg.status
+				cmd = m.checkPinsCmd(repo, msg.gen)
 			}
 		}
+		m.noteRefreshDone(msg.gen)
+		return m, cmd
+
+	case behindMsg:
+		for k, v := range msg.behind {
+			m.behind[k] = v
+		}
+		m.recountTree()
 		m.noteRefreshDone(msg.gen)
 		return m, nil
 
@@ -463,6 +479,23 @@ func (m *Model) applyWorkspaces(mod *domain.Module, names []string) {
 	}
 }
 
+// checkPinsCmd compares every pin of git modules living in repo against its
+// checkout, once the repo's remote URL is known. A refresh in flight for gen
+// waits for the result.
+func (m *Model) checkPinsCmd(repo *domain.Repo, gen int) tea.Cmd {
+	if repo.Git.RemoteURL == "" {
+		return nil
+	}
+	refs := m.index.RefsTo(deps.NormalizeRepoURL(repo.Git.RemoteURL))
+	if len(refs) == 0 {
+		return nil
+	}
+	if gen != 0 && gen == m.refreshGen {
+		m.refreshLeft++
+	}
+	return behindCmd(repo.Path, refs, gen)
+}
+
 func (m *Model) findModule(path string) *domain.Module {
 	for _, repo := range m.repos {
 		for _, mod := range repo.Modules {
@@ -675,11 +708,65 @@ func (m *Model) applyDone(ev runner.Event) tea.Cmd {
 		if *ev.ApplyExit == 0 {
 			m.planFiles[ev.Key] = false
 			m.status = fmt.Sprintf("applied %s//%s ✓", rec.ModulePath, rec.Workspace)
-			return tea.Batch(saveRunCmd(m.store, rec), discardPlanCmd(m.store, rec.ModulePath, rec.Workspace))
+			cmds := []tea.Cmd{saveRunCmd(m.store, rec), discardPlanCmd(m.store, rec.ModulePath, rec.Workspace)}
+			if n, downstream := m.invalidateDownstream(rec, now); n > 0 {
+				m.status += fmt.Sprintf(" — %d downstream workspace(s) need plan", n)
+				cmds = append(cmds, downstream...)
+			}
+			return tea.Batch(cmds...)
 		}
 		m.status = fmt.Sprintf("apply failed (exit %d) — press enter to inspect the tmux window", *ev.ApplyExit)
 	}
 	return saveRunCmd(m.store, rec)
+}
+
+// invalidateDownstream marks the planned workspaces of every root reading
+// the applied workspace's state as needing a plan, when the apply changed
+// outputs. It walks one hop only: marking is not an apply, so nothing
+// cascades, and roots that read each other's state cannot loop. Returns how
+// many records were marked and the commands persisting them.
+func (m *Model) invalidateDownstream(upstream *state.RunRecord, now time.Time) (int, []tea.Cmd) {
+	if !upstream.OutputsChanged {
+		return 0, nil
+	}
+	up := m.findModule(upstream.ModulePath)
+	if up == nil || up.Deps == nil || up.Deps.Backend == nil {
+		return 0, nil
+	}
+	by := up.Repo.Name + "/" + up.RelPath + "//" + upstream.Workspace
+	var cmds []tea.Cmd
+	for _, down := range m.index.DependentsOfState(up) {
+		if down == up {
+			continue
+		}
+		for _, ws := range down.Workspaces {
+			rec := m.runs[ws.Key()]
+			if rec == nil || rec.Invalidated != nil {
+				continue
+			}
+			if !readsWorkspace(down, up, ws.Name, upstream.Workspace) {
+				continue
+			}
+			rec.Invalidated = &state.Invalidation{By: by, At: now}
+			cmds = append(cmds, saveRunCmd(m.store, rec))
+		}
+	}
+	return len(cmds), cmds
+}
+
+// readsWorkspace reports whether down, run in workspace ws, reads upstream
+// workspace target of up's state through any of its remote-state blocks.
+func readsWorkspace(down, up *domain.Module, ws, target string) bool {
+	for _, rs := range down.Deps.RemoteStates {
+		if !up.Deps.Backend.SameState(rs.StateAddress) {
+			continue
+		}
+		mapped, known := deps.MapWorkspace(rs, ws)
+		if !known || mapped == target {
+			return true
+		}
+	}
+	return false
 }
 
 // --- task log viewer / live follow ---
@@ -1100,6 +1187,7 @@ func (m *Model) reflow() {
 		target = r.rowID()
 	}
 	m.rows = m.flatten()
+	m.index = deps.Build(m.visibleRepos())
 	m.recountTree()
 	if target != "" {
 		m.focusNode(target)
@@ -1118,7 +1206,7 @@ func (m *Model) reflow() {
 // collapse, which don't change the totals). Called from reflow so View can read
 // the counts without rescanning every frame.
 func (m *Model) recountTree() {
-	var repos, mods, wss, needPlan int
+	var repos, mods, wss, needPlan, modsBehind int
 	for _, repo := range m.repos {
 		repoIgnored := m.ignore[repo.Path]
 		if repoIgnored && !m.showIgnored {
@@ -1131,6 +1219,9 @@ func (m *Model) recountTree() {
 				continue
 			}
 			mods++
+			if len(attention.Module(mod.Deps, m.behind)) > 0 {
+				modsBehind++
+			}
 			for _, ws := range mod.Workspaces {
 				if (modIgnored || m.ignore[ws.Key()]) && !m.showIgnored {
 					continue
@@ -1142,7 +1233,24 @@ func (m *Model) recountTree() {
 			}
 		}
 	}
-	m.nRepos, m.nModules, m.nWorkspaces, m.nNeedPlan = repos, mods, wss, needPlan
+	m.nRepos, m.nModules, m.nWorkspaces, m.nNeedPlan, m.nModulesBehind = repos, mods, wss, needPlan, modsBehind
+}
+
+// visibleRepos returns copies of the repos holding only the modules the user
+// manages (not ignored, not manifest-hidden), for the dependency index.
+func (m *Model) visibleRepos() []*domain.Repo {
+	var out []*domain.Repo
+	for _, repo := range m.repos {
+		r := *repo
+		r.Modules = nil
+		for _, mod := range repo.Modules {
+			if !m.moduleHidden(mod) {
+				r.Modules = append(r.Modules, mod)
+			}
+		}
+		out = append(out, &r)
+	}
+	return out
 }
 
 // chromeRows is the fixed vertical chrome around the body: the title bar, the
@@ -1538,7 +1646,7 @@ func (m *Model) applyBlocker(key string) string {
 	case m.hasTask(runner.KindApply, key):
 		return "apply already queued/running — press enter to attach"
 	case m.isStale(rec):
-		return "plan is STALE (module changed since plan) — re-plan, or attach and apply manually"
+		return "plan is STALE (module or upstream state changed since plan) — re-plan, or attach and apply manually"
 	}
 	return ""
 }
@@ -1778,6 +1886,9 @@ func (m *Model) renderHeader() string {
 	}
 	if m.nNeedPlan > 0 {
 		meta = append(meta, styleStale.Render(fmt.Sprintf("%d need plan", m.nNeedPlan)))
+	}
+	if m.nModulesBehind > 0 {
+		meta = append(meta, styleStale.Render(fmt.Sprintf("%d modules behind", m.nModulesBehind)))
 	}
 	if !m.tmuxOK {
 		meta = append(meta, styleError.Render("tmux: unavailable"))

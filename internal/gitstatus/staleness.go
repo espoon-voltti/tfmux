@@ -43,19 +43,8 @@ func Fingerprint(ctx context.Context, repoPath string, relPaths []string) (strin
 // treeID returns the id of rel's tree at HEAD, or "" when HEAD has no such
 // path.
 func treeID(ctx context.Context, repoPath, rel string) (string, error) {
-	spec := "HEAD:"
-	if rel != "." && rel != "" {
-		spec += strings.TrimSuffix(rel, "/")
-	}
-	out, err := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--verify", "--quiet", spec).Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			return "", nil
-		}
-		return "", fmt.Errorf("git rev-parse %s in %s: %w", spec, repoPath, err)
-	}
-	return strings.TrimSpace(string(out)), nil
+	id, _, err := TreeID(ctx, repoPath, "HEAD", rel)
+	return id, err
 }
 
 func dirtyHash(ctx context.Context, repoPath string, relPaths []string) (string, error) {

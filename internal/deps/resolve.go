@@ -130,3 +130,20 @@ func sorted(mods []*domain.Module) []*domain.Module {
 	sort.Slice(mods, func(i, j int) bool { return mods[i].Path < mods[j].Path })
 	return mods
 }
+
+// RefsTo lists the pins of git modules living in repo (a NormalizeRepoURL
+// key), one per RefKey.
+func (ix *Index) RefsTo(repo string) []domain.GitRef {
+	seen := map[string]bool{}
+	var refs []domain.GitRef
+	for _, mod := range ix.modules {
+		for _, g := range mod.Deps.Git {
+			if g.Repo == repo && !seen[RefKey(g)] {
+				seen[RefKey(g)] = true
+				refs = append(refs, g)
+			}
+		}
+	}
+	sort.Slice(refs, func(i, j int) bool { return RefKey(refs[i]) < RefKey(refs[j]) })
+	return refs
+}

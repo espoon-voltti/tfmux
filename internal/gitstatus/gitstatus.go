@@ -41,7 +41,9 @@ func (c CLI) Status(ctx context.Context, repoPath string) domain.GitStatus {
 		}
 		return domain.GitStatus{Err: fmt.Errorf("git status in %s: %w (%s)", repoPath, err, detail)}
 	}
-	return Parse(string(out))
+	st := Parse(string(out))
+	st.RemoteURL = RemoteURL(ctx, repoPath)
+	return st
 }
 
 // Parse decodes porcelain=v2 --branch output.

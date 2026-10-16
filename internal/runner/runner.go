@@ -883,6 +883,7 @@ func (r *Runner) plan(ctx context.Context, tf tfexec.TF, m *domain.Module, works
 	if res.ExitCode == tfexec.PlanChanges {
 		if plan, err := tf.ShowPlan(ctx, planFile); err == nil {
 			rec.Summary = summarize(plan)
+			rec.OutputsChanged = outputsChanged(plan)
 		}
 	}
 	if res.ExitCode != tfexec.PlanError {

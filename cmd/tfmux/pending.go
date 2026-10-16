@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/espoon-voltti/tfmux/internal/attention"
+	"github.com/espoon-voltti/tfmux/internal/deps"
 	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/gitstatus"
 	"github.com/espoon-voltti/tfmux/internal/paths"
@@ -27,22 +28,28 @@ import (
 type pendingRow struct {
 	Repo         string             `json:"repo"`
 	Module       string             `json:"module"`
-	Workspace    string             `json:"workspace"`
+	Workspace    string             `json:"workspace,omitempty"` // "" for a module-level row
 	Reasons      []attention.Reason `json:"reasons"`
 	PlanFinished *time.Time         `json:"plan_finished,omitempty"`
 }
 
-// pendingReport assesses every visible workspace of the discovered repos.
-// Modules whose workspaces are not known (never enumerated, not in a
-// manifest) are listed in notes rather than assessed.
+// pendingReport assesses every visible workspace of the discovered repos,
+// and every visible module's git module pins against the shared repos'
+// checkouts. Modules whose workspaces are not known (never enumerated, not
+// in a manifest) are listed in notes rather than assessed.
 func pendingReport(store *state.Store, ignore state.Ignore, repos []*domain.Repo, needsPlanOnly bool) (rows []pendingRow, notes []string) {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	ctx := context.Background()
-	for _, repo := range repos {
+	visible := visibleRepos(ignore, repos)
+	var behind map[string]deps.Behind
+	if !needsPlanOnly {
+		behind = checkPins(ctx, visible, deps.Build(visible))
+	}
+	for _, repo := range visible {
 		for _, mod := range repo.Modules {
-			if ignore.HidesModule(mod) {
-				continue
+			for _, r := range attention.Module(mod.Deps, behind) {
+				rows = append(rows, pendingRow{Repo: repo.Name, Module: mod.RelPath, Reasons: []attention.Reason{r}})
 			}
 			var workspaces []string
 			if mod.ManifestListed {
@@ -108,7 +115,11 @@ func printPending(out io.Writer, rows []pendingRow, now time.Time) {
 		if r.PlanFinished != nil {
 			details = append(details, "planned "+ago(now.Sub(*r.PlanFinished)))
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.Repo, r.Module, r.Workspace, r.Reasons[0].Code, strings.Join(details, ", "))
+		ws := r.Workspace
+		if ws == "" {
+			ws = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.Repo, r.Module, ws, r.Reasons[0].Code, strings.Join(details, ", "))
 	}
 	tw.Flush()
 }
