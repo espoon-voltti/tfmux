@@ -1,0 +1,201 @@
+// SPDX-FileCopyrightText: 2026 City of Espoo
+//
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/espoon-voltti/tfmux/internal/deps"
+	"github.com/espoon-voltti/tfmux/internal/domain"
+	"github.com/espoon-voltti/tfmux/internal/state"
+)
+
+// depsModule is one root module's dependencies as `tfmux deps --json`
+// prints them: the scanned Deps plus each remote state resolved to the root
+// module holding it, when one is discovered.
+type depsModule struct {
+	Repo      string         `json:"repo"`
+	Module    string         `json:"module"`
+	Path      string         `json:"path"`
+	Deps      *domain.Deps   `json:"deps"`
+	Upstreams []depsUpstream `json:"upstreams,omitempty"`
+	Hidden    bool           `json:"-"`
+	mod       *domain.Module
+}
+
+type depsUpstream struct {
+	RemoteState string `json:"remote_state"`   // the data block's name
+	Repo        string `json:"repo,omitempty"` // resolved root module, when discovered
+	Module      string `json:"module,omitempty"`
+}
+
+// depsReport lists the visible root modules with their dependencies, and the
+// index for reverse lookups over the same set.
+func depsReport(ignore state.Ignore, repos []*domain.Repo) ([]depsModule, *deps.Index) {
+	var visible []*domain.Repo
+	for _, repo := range repos {
+		r := *repo
+		r.Modules = nil
+		for _, mod := range repo.Modules {
+			if !ignore.HidesModule(mod) {
+				r.Modules = append(r.Modules, mod)
+			}
+		}
+		visible = append(visible, &r)
+	}
+	ix := deps.Build(visible)
+	var out []depsModule
+	for _, repo := range visible {
+		for _, mod := range repo.Modules {
+			if mod.Deps == nil {
+				continue
+			}
+			dm := depsModule{Repo: repo.Name, Module: mod.RelPath, Path: mod.Path, Deps: mod.Deps, mod: mod}
+			for _, rs := range mod.Deps.RemoteStates {
+				up := depsUpstream{RemoteState: rs.Name}
+				if upstream := ix.Upstream(rs); upstream != nil {
+					up.Repo, up.Module = upstream.Repo.Name, upstream.RelPath
+				}
+				dm.Upstreams = append(dm.Upstreams, up)
+			}
+			out = append(out, dm)
+		}
+	}
+	return out, ix
+}
+
+func moduleLabel(mod *domain.Module) string { return mod.Repo.Name + "/" + mod.RelPath }
+
+func printDepsForward(out io.Writer, mods []depsModule, filter string) {
+	for _, dm := range mods {
+		label := dm.Repo + "/" + dm.Module
+		if filter != "" && !strings.Contains(label, filter) {
+			continue
+		}
+		fmt.Fprintln(out, label)
+		for _, g := range dm.Deps.Git {
+			ref := g.Ref
+			if ref == "" {
+				ref = "(unpinned)"
+			}
+			fmt.Fprintf(out, "  git     %s @%s  (via %s)\n", g.Key(), ref, g.Via)
+		}
+		for _, l := range dm.Deps.Local {
+			where := l.RelPath
+			if !l.InRepo {
+				where = l.Dir + "  (outside the repo: not fingerprinted)"
+			}
+			fmt.Fprintf(out, "  local   %s  (via %s)\n", where, l.Via)
+		}
+		for i, rs := range dm.Deps.RemoteStates {
+			target := rs.String() + "  (no root module found)"
+			if up := dm.Upstreams[i]; up.Module != "" {
+				target = up.Repo + "/" + up.Module
+			}
+			fmt.Fprintf(out, "  state   %s  (%s, workspace: %s)\n", target, rs.Name, describeWorkspace(rs))
+		}
+	}
+}
+
+func describeWorkspace(rs domain.RemoteStateRef) string {
+	switch rs.WorkspaceKind {
+	case domain.WorkspaceSame:
+		return "same"
+	case domain.WorkspaceLiteral:
+		return rs.WorkspaceExpr
+	case domain.WorkspaceTemplate:
+		return rs.WorkspaceExpr
+	default:
+		return rs.WorkspaceExpr + " — unresolved"
+	}
+}
+
+// printDepsReverse lists, for every git module and remote state in use, the
+// root modules depending on it. filter substring-matches the key.
+func printDepsReverse(out io.Writer, ix *deps.Index, filter string) {
+	for _, key := range ix.GitKeys() {
+		if filter != "" && !strings.Contains(key, filter) {
+			continue
+		}
+		fmt.Fprintln(out, key)
+		for _, mod := range ix.DependentsOfGit(key) {
+			for _, g := range mod.Deps.Git {
+				if g.Key() == key {
+					fmt.Fprintf(out, "  %s @%s  (via %s)\n", moduleLabel(mod), g.Ref, g.Via)
+				}
+			}
+		}
+	}
+	for _, addr := range ix.StateKeys() {
+		key := addr.String()
+		if filter != "" && !strings.Contains(key, filter) {
+			continue
+		}
+		fmt.Fprintln(out, key)
+		for _, mod := range ix.DependentsOfAddress(addr) {
+			for _, rs := range mod.Deps.RemoteStates {
+				if addr.SameState(rs.StateAddress) {
+					fmt.Fprintf(out, "  %s  (%s, workspace: %s)\n", moduleLabel(mod), rs.Name, describeWorkspace(rs))
+				}
+			}
+		}
+	}
+}
+
+func runDeps(args []string) error {
+	asJSON, reverse := false, false
+	var filter string
+	for _, a := range args {
+		switch {
+		case a == "--json":
+			asJSON = true
+		case a == "--reverse" || a == "-r":
+			reverse = true
+		case strings.HasPrefix(a, "-"):
+			return fmt.Errorf("deps: unknown flag %q", a)
+		case filter != "":
+			return fmt.Errorf("deps: only one filter allowed")
+		default:
+			filter = a
+		}
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	_, ignore, err := openStore()
+	if err != nil {
+		return err
+	}
+	repos, err := discoverWithGit(context.Background(), cfg)
+	if err != nil {
+		return err
+	}
+	mods, ix := depsReport(ignore, repos)
+	for _, dm := range mods {
+		for _, e := range dm.Deps.Errors {
+			fmt.Fprintf(os.Stderr, "tfmux: %s/%s: %s\n", dm.Repo, dm.Module, e)
+		}
+	}
+	switch {
+	case asJSON:
+		if mods == nil {
+			mods = []depsModule{}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(mods)
+	case reverse:
+		printDepsReverse(os.Stdout, ix, filter)
+	default:
+		printDepsForward(os.Stdout, mods, filter)
+	}
+	return nil
+}

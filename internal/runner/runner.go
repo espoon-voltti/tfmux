@@ -889,11 +889,8 @@ func (r *Runner) plan(ctx context.Context, tf tfexec.TF, m *domain.Module, works
 		if v, err := tf.Version(ctx); err == nil {
 			rec.TFBinVersion = v
 		}
-		if head, err := gitstatus.Head(ctx, m.Repo.Path); err == nil {
-			rec.GitHead = head
-		}
-		if dh, err := gitstatus.DirtyHash(ctx, m.Repo.Path, m.RelPath); err == nil {
-			rec.DirtyHash = dh
+		if fp, err := gitstatus.Fingerprint(ctx, m.Repo.Path, m.FingerprintPaths()); err == nil {
+			rec.Fingerprint = fp
 		}
 	}
 	// A clean or failed plan leaves no plan file worth applying.

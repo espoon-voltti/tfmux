@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/espoon-voltti/tfmux/internal/attention"
 	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/state"
@@ -324,6 +325,9 @@ func (m *Model) renderWorkspaceStatus(ws *domain.Workspace) string {
 		}
 	}
 	parts = append(parts, styleDim.Render(humanDur(rec.PlanFinished)))
+	if rec.PlanExitCode != tfexec.PlanChanges && m.isStale(rec) {
+		parts = append(parts, styleStale.Render("needs plan"))
+	}
 	if rec.Apply != nil {
 		a := rec.Apply
 		switch {
@@ -338,13 +342,17 @@ func (m *Model) renderWorkspaceStatus(ws *domain.Workspace) string {
 	return strings.Join(parts, " ")
 }
 
-// isStale reports whether the module's git content changed since the plan.
+// reasons assesses a workspace from the model's run records, plan files and
+// current fingerprints.
+func (m *Model) reasons(key string) []attention.Reason {
+	modulePath, _, _ := splitWSKey(key)
+	return attention.Assess(m.runs[key], m.planFiles[key], m.fingerprints[modulePath])
+}
+
+// isStale reports whether the module's content changed since the plan, so a
+// saved plan file must not be applied.
 func (m *Model) isStale(rec *state.RunRecord) bool {
-	current, ok := m.fingerprints[rec.ModulePath]
-	if !ok {
-		return false
-	}
-	return current != rec.GitHead+"|"+rec.DirtyHash
+	return attention.Stale(m.reasons(rec.ModulePath + "//" + rec.Workspace))
 }
 
 func firstLine(s string) string {

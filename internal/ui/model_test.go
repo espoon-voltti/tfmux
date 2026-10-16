@@ -234,7 +234,7 @@ func TestStaleBadge(t *testing.T) {
 	m.runs[key] = &state.RunRecord{
 		ModulePath: mod.Path, Workspace: "prod",
 		PlanFinished: time.Now(), PlanExitCode: tfexec.PlanChanges,
-		GitHead: "aaa", DirtyHash: "bbb",
+		Fingerprint: "aaa|bbb",
 	}
 	m.planFiles[key] = true
 	m.fingerprints[mod.Path] = "aaa|bbb"
@@ -340,7 +340,7 @@ func TestApplyGuards(t *testing.T) {
 	m.runs[key] = &state.RunRecord{
 		ModulePath: mod.Path, Workspace: "prod",
 		PlanFinished: time.Now(), PlanExitCode: tfexec.PlanChanges,
-		GitHead: "aaa", DirtyHash: "bbb",
+		Fingerprint: "aaa|bbb",
 	}
 	m.planFiles[key] = false
 	keyPress(m, "A")
@@ -362,7 +362,7 @@ func changedPlan(m *Model, mod *domain.Module, ws string) {
 	m.runs[key] = &state.RunRecord{
 		ModulePath: mod.Path, Workspace: ws,
 		PlanFinished: time.Now(), PlanExitCode: tfexec.PlanChanges,
-		GitHead: "aaa", DirtyHash: "bbb",
+		Fingerprint: "aaa|bbb",
 	}
 	m.planFiles[key] = true
 	m.fingerprints[mod.Path] = "aaa|bbb"
@@ -669,5 +669,46 @@ func TestMassApplyOnlyTargetsFilteredWorkspaces(t *testing.T) {
 	}
 	if !strings.Contains(m.View(), `matching "blue"`) {
 		t.Error("confirmation prompt should mention the active filter")
+	}
+}
+
+func TestCleanPlanNeedsPlanAfterChange(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	m.runs[key] = &state.RunRecord{
+		ModulePath: mod.Path, Workspace: "prod",
+		PlanFinished: time.Now(), PlanExitCode: tfexec.PlanClean,
+		Fingerprint: "aaa|bbb",
+	}
+	m.fingerprints[mod.Path] = "aaa|bbb"
+	m.reflow()
+	if v := m.View(); strings.Contains(v, "needs plan") || strings.Contains(v, "need plan") {
+		t.Error("current clean plan flagged as needing a plan")
+	}
+	m.fingerprints[mod.Path] = "ccc|ddd"
+	m.reflow()
+	v := m.View()
+	if !strings.Contains(v, "✓ clean") || !strings.Contains(v, "needs plan") {
+		t.Errorf("changed clean plan should keep its result and add the badge, got:\n%s", v)
+	}
+	if !strings.Contains(v, "1 need plan") {
+		t.Errorf("title bar should count it, got:\n%s", v)
+	}
+}
+
+func TestLegacyRecordNeedsPlan(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	m.runs[key] = &state.RunRecord{
+		ModulePath: mod.Path, Workspace: "prod",
+		PlanFinished: time.Now(), PlanExitCode: tfexec.PlanChanges,
+	}
+	m.planFiles[key] = true
+	m.fingerprints[mod.Path] = "aaa|bbb"
+	m.reflow()
+	if !strings.Contains(m.View(), "STALE") {
+		t.Error("a record without a fingerprint must not be applyable")
 	}
 }

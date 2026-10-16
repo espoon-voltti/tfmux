@@ -40,20 +40,29 @@ test (`internal/ui/e2e_test.go`, via teatest).
 ## Layout
 
 - `cmd/tfmux/main.go` — entrypoint and subcommands: `tui` (default), `init`,
-  `ls [--json]`, `version`.
+  `ls [--json]`, `pending` (`pending.go`), `deps` (`deps.go`), `version`.
 - `internal/domain` — shared model (Repo → Module → Workspace) and statuses. Has
   **no dependencies on other tfmux packages**; keep it that way so every layer
   can import it.
 - `internal/ui` — the Bubble Tea TUI (the bulk of the code). `model.go` is the
   root model; `tree.go`, `tasks.go`, `styles.go`, `keys.go`, `msgs.go`.
-- `internal/discovery` — walks roots → repos → root modules.
+- `internal/discovery` — walks roots → repos → root modules, scanning each
+  module's dependencies on the way.
+- `internal/deps` — static HCL scan of a root module's module calls, remote
+  states and backend (`Scan`), and the cross-repo `Index` that resolves remote
+  states to root modules and answers reverse lookups. Direct edges only: state
+  graphs in the wild contain cycles.
 - `internal/runner` — the task scheduler (enumerate/init/plan/apply as tasks on
   one bounded worker pool, prioritized queue).
 - `internal/tfexec` — builds/runs terraform (or OpenTofu) commands.
 - `internal/tmuxctl` — drives tmux for applies.
 - `internal/state` — persists machine-owned state under XDG state dir.
 - `internal/config` / `internal/paths` — TOML config and XDG path resolution.
-- `internal/gitstatus` — branch/dirty/ahead-behind snapshot.
+- `internal/gitstatus` — branch/dirty/ahead-behind snapshot, and the per-module
+  content fingerprint plans are checked against.
+- `internal/attention` — pure "what needs attention" assessment of a workspace
+  from its run record and fingerprint; the TUI status cell and `tfmux pending`
+  must both go through it.
 
 ## UI conventions (internal/ui)
 

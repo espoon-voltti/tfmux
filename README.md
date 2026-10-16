@@ -32,8 +32,10 @@ tfmux
   toggle (`i`) and re-enabled later (`Z` shows ignored items).
 - **Git status** per repo: branch, uncommitted changes, ahead/behind.
 - **Workspace status** at a glance: time since last plan, outstanding
-  changes (`● +2 ~1 -0`), plan errors, `STALE` badge when the module's git
-  content changed after the plan was taken, apply progress/result.
+  changes (`● +2 ~1 -0`), plan errors, apply progress/result. A `STALE`
+  badge on a saved plan, or `needs plan` on a clean one, means the module's
+  content (committed or not) changed after the plan was taken; the title bar
+  counts how many workspaces need a plan.
 - **Bulk plans**: `p` plans the selection (workspace, module, repo or marked
   set), `P` plans everything visible. Plans run headless with bounded
   parallelism (`terraform plan -detailed-exitcode -out=…`); same-module jobs
@@ -63,6 +65,18 @@ It won't overwrite an existing config. For all settings, see
 [config.example.toml](config.example.toml).
 
 Run `tfmux` for the TUI, or `tfmux ls [--json]` for a scriptable dump.
+
+`tfmux pending [--json] [--needs-plan]` lists, without launching the TUI or
+running terraform, every workspace that needs attention: never planned,
+changed since its last plan, a plan waiting to be applied, a plan or apply
+error. `--needs-plan` keeps only the rows whose next step is a plan. It reads
+the same run records and workspace caches as the TUI, so a module whose
+workspaces the TUI has never listed is reported on stderr instead.
+
+`tfmux deps [--reverse] [--json] [FILTER]` prints what each root module
+depends on, or with `--reverse` who depends on each shared thing — so
+`tfmux deps --reverse evaka-infra-shared//modules/waf` answers "which roots
+use waf, at which ref". See [Dependencies](#dependencies).
 
 ## Keys
 
@@ -137,6 +151,12 @@ Run `tfmux` for the TUI, or `tfmux ls [--json]` for a scriptable dump.
   automatically and caps concurrent inits (lazy or explicit) at 1, without
   touching `parallelism` for anything else; override with `init_parallelism`
   if detection ever needs a hand.
+- **Staleness is per module, not per repo.** A plan records a fingerprint of
+  the module directory: its tree at HEAD plus any uncommitted changes under
+  it. Commits elsewhere in the repo leave it alone, so a `git pull` only flags
+  the modules it touched. Fingerprints are refreshed on discovery, after each
+  plan and on `r` — press `r` after pulling. Plans recorded by tfmux versions
+  without fingerprints show as needing a plan once.
 - **Plan files contain secrets.** They live under `~/.local/state/tfmux`
   with 0700/0600 permissions and are deleted after a successful apply, on
   discard, and after `plan_ttl` (default 24h).
@@ -217,6 +237,28 @@ environment is instead a separate backend picked with `-backend-config`, a
   (`init.workspace` in the module's state dir) and re-runs `init` before a
   plan, output or apply for a different workspace — an apply does so inside
   its tmux window, before `terraform apply`.
+
+## Dependencies
+
+tfmux reads every root module's `.tf` files (statically — no `terraform
+init` needed, so it reports what is written, not what was last initialised)
+and records:
+
+- **Git module calls** (`git::…`, `git@host:…`, `github.com/…` sources),
+  split into repo, subdirectory and `ref`, followed through local modules.
+- **Local module calls** (`./` and `../` sources), transitively. Those inside
+  the repo are part of the module's fingerprint, so editing `../modules/x`
+  flags every root calling it as needing a plan. Sources outside the repo are
+  listed but not fingerprinted.
+- **Remote states** read via `data "terraform_remote_state"`, matched to the
+  root module whose backend block has the same bucket and key. The workspace
+  expression is classified as the same workspace, a literal, a template over
+  `terraform.workspace`, or unresolved (anything else, e.g. `local.*`).
+- The root's **own backend**, when its bucket and key are literal (partial
+  `-backend-config` setups are not matched).
+
+Registry modules are ignored. Root modules that read each other's state are
+fine: only direct edges are stored, nothing walks the graph.
 
 ## Development
 

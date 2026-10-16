@@ -149,9 +149,8 @@ func loadRunsCmd(store *state.Store, m *domain.Module, workspaces []string) tea.
 func fingerprintCmd(m *domain.Module, gen int) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		head, _ := gitstatus.Head(ctx, m.Repo.Path)
-		dirty, _ := gitstatus.DirtyHash(ctx, m.Repo.Path, m.RelPath)
-		return fingerprintMsg{modulePath: m.Path, fingerprint: head + "|" + dirty, gen: gen}
+		fp, _ := gitstatus.Fingerprint(ctx, m.Repo.Path, m.FingerprintPaths())
+		return fingerprintMsg{modulePath: m.Path, fingerprint: fp, gen: gen}
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclparse"
 
+	"github.com/espoon-voltti/tfmux/internal/deps"
 	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/manifest"
 )
@@ -106,6 +107,9 @@ func scanRepo(repoPath string) *domain.Repo {
 		return nil
 	})
 	applyManifest(repo)
+	for _, mod := range repo.Modules {
+		mod.Deps = deps.Scan(mod.Path, repo.Path)
+	}
 	sort.Slice(repo.Modules, func(i, j int) bool { return repo.Modules[i].RelPath < repo.Modules[j].RelPath })
 	return repo
 }

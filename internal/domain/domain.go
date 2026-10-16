@@ -65,6 +65,8 @@ type Module struct {
 	ManifestListed     bool              // true when the repo manifest lists this module
 	ManifestWorkspaces []string          // this module's workspaces per the manifest, when ManifestListed
 	Templates          *CommandTemplates // from the repo manifest; nil means the default terraform commands
+
+	Deps *Deps // statically scanned module and remote-state dependencies; nil before scanning
 }
 
 // ManifestHidden reports whether the module should be hidden from the normal

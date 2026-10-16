@@ -26,6 +26,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/espoon-voltti/tfmux/internal/attention"
 	"github.com/espoon-voltti/tfmux/internal/config"
 	"github.com/espoon-voltti/tfmux/internal/discovery"
 	"github.com/espoon-voltti/tfmux/internal/domain"
@@ -92,6 +93,7 @@ type Model struct {
 	// Cached estate totals for the title bar, refreshed in reflow (honoring
 	// ignore/showIgnored) so View doesn't rescan every frame.
 	nRepos, nModules, nWorkspaces int
+	nNeedPlan                     int // visible workspaces whose next step is a plan
 
 	// refreshGen/refreshLeft join the concurrent git-status/fingerprint/expiry
 	// commands fanned out by refresh() so its completion can be announced.
@@ -448,9 +450,7 @@ func (m *Model) updateManifestReloaded(msg manifestReloadedMsg) (tea.Model, tea.
 // moduleHidden reports whether a module is excluded from the normal
 // (non-showIgnored) view: its repo or itself explicitly ignored, or its repo
 // has a manifest that doesn't list it.
-func (m *Model) moduleHidden(mod *domain.Module) bool {
-	return m.ignore[mod.Repo.Path] || m.ignore[mod.Path] || mod.ManifestHidden()
-}
+func (m *Model) moduleHidden(mod *domain.Module) bool { return m.ignore.HidesModule(mod) }
 
 // applyWorkspaces sets a module's workspace list (from cache or a fresh
 // enumeration) and marks it ready.
@@ -1118,7 +1118,7 @@ func (m *Model) reflow() {
 // collapse, which don't change the totals). Called from reflow so View can read
 // the counts without rescanning every frame.
 func (m *Model) recountTree() {
-	var repos, mods, wss int
+	var repos, mods, wss, needPlan int
 	for _, repo := range m.repos {
 		repoIgnored := m.ignore[repo.Path]
 		if repoIgnored && !m.showIgnored {
@@ -1136,10 +1136,13 @@ func (m *Model) recountTree() {
 					continue
 				}
 				wss++
+				if attention.NeedsPlan(m.reasons(ws.Key())) {
+					needPlan++
+				}
 			}
 		}
 	}
-	m.nRepos, m.nModules, m.nWorkspaces = repos, mods, wss
+	m.nRepos, m.nModules, m.nWorkspaces, m.nNeedPlan = repos, mods, wss, needPlan
 }
 
 // chromeRows is the fixed vertical chrome around the body: the title bar, the
@@ -1772,6 +1775,9 @@ func (m *Model) renderHeader() string {
 			parts = append(parts, fmt.Sprintf("%d queued", queued))
 		}
 		meta = append(meta, m.spinner.View()+" "+strings.Join(parts, ", "))
+	}
+	if m.nNeedPlan > 0 {
+		meta = append(meta, styleStale.Render(fmt.Sprintf("%d need plan", m.nNeedPlan)))
 	}
 	if !m.tmuxOK {
 		meta = append(meta, styleError.Render("tmux: unavailable"))

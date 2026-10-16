@@ -36,6 +36,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/espoon-voltti/tfmux/internal/domain"
 )
 
 // ChangeSummary counts planned resource changes, as in
@@ -79,8 +81,9 @@ type RunRecord struct {
 
 	Summary ChangeSummary `json:"summary"`
 
-	GitHead      string `json:"git_head,omitempty"`
-	DirtyHash    string `json:"dirty_hash,omitempty"`
+	// Fingerprint is the module content the plan was taken against (see
+	// gitstatus.Fingerprint). Empty in records written before it existed.
+	Fingerprint  string `json:"fingerprint,omitempty"`
 	TFBinVersion string `json:"tf_bin_version,omitempty"`
 
 	Apply *ApplyRecord `json:"apply,omitempty"`
@@ -381,6 +384,12 @@ func (s *Store) GC() (int, error) {
 // Ignore is a persisted set of ignored item keys: repo paths, module paths,
 // or workspace keys (modulePath + "//" + workspace).
 type Ignore map[string]bool
+
+// HidesModule reports whether a module is excluded from the normal view: its
+// repo or itself ignored, or its repo has a manifest that doesn't list it.
+func (ig Ignore) HidesModule(mod *domain.Module) bool {
+	return ig[mod.Repo.Path] || ig[mod.Path] || mod.ManifestHidden()
+}
 
 func (s *Store) ignorePath() string { return filepath.Join(s.Dir, "ignore.json") }
 

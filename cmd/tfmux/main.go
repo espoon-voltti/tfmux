@@ -52,6 +52,10 @@ func run(args []string) error {
 		return runInit(os.Stdin, os.Stdout)
 	case "ls":
 		return runLs(args)
+	case "pending":
+		return runPending(args)
+	case "deps":
+		return runDeps(args)
 	case "tui":
 		return runTUI()
 	case "help", "--help", "-h":
@@ -72,6 +76,12 @@ commands:
              infra repos are checked out under
   ls         print discovered repos, modules and git status
   ls --json  same, as JSON
+  pending    list workspaces that need attention: never planned, changed since
+             the last plan, plan ready to apply, errors (--json; --needs-plan
+             to keep only those whose next step is a plan)
+  deps       what each root module depends on: git and local modules, remote
+             states (resolved to the root module holding them); --reverse lists
+             who depends on each; an argument filters by substring; --json
   version    print version
 `)
 }

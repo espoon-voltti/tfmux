@@ -22,8 +22,7 @@ func TestRunRecordRoundTrip(t *testing.T) {
 		PlanFinished: now.Add(time.Minute),
 		PlanExitCode: 2,
 		Summary:      ChangeSummary{Add: 2, Change: 1},
-		GitHead:      "abc123",
-		DirtyHash:    "def456",
+		Fingerprint:  "abc123|def456",
 		TFBinVersion: "1.9.0",
 		Apply:        &ApplyRecord{Started: now, ExitCode: &ec, WindowID: "@3"},
 	}
