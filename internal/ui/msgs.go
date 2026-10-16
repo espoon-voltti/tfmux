@@ -79,6 +79,29 @@ func loadLogCmd(id, path string) tea.Cmd {
 	}
 }
 
+// refsUpdatedMsg reports the rewrite of a module's outdated git module
+// sources, with the module's deps rescanned from the edited files.
+type refsUpdatedMsg struct {
+	modulePath string
+	deps       *domain.Deps
+	refs       int // source occurrences rewritten
+	files      int
+	err        error
+}
+
+// updateRefsCmd rewrites mod's .tf sources per replace (old source → new
+// source) and rescans its deps.
+func updateRefsCmd(mod *domain.Module, replace map[string]string) tea.Cmd {
+	return func() tea.Msg {
+		refs, files, err := deps.RewriteSources(deps.SourceDirs(mod), replace)
+		msg := refsUpdatedMsg{modulePath: mod.Path, refs: refs, files: files, err: err}
+		if err == nil {
+			msg.deps = deps.Scan(mod.Path, mod.Repo.Path)
+		}
+		return msg
+	}
+}
+
 type expiredPlansMsg struct {
 	n   int
 	gen int // refresh generation; 0 for non-refresh callers

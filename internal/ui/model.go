@@ -132,6 +132,10 @@ type Model struct {
 	confirmApply      []*domain.Workspace
 	confirmApplyLabel string
 
+	// confirmUpgrade holds an init -upgrade awaiting the answer to "bump the
+	// outdated module pins first?".
+	confirmUpgrade *upgradePrompt
+
 	status string
 	width  int
 	height int
@@ -267,6 +271,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.reflow()
 		return m, m.tickSpinner()
+
+	case refsUpdatedMsg:
+		return m, m.updateRefsDone(msg)
 
 	case fingerprintMsg:
 		m.fingerprints[msg.modulePath] = msg.fingerprint
@@ -914,6 +921,15 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if p := m.confirmUpgrade; p != nil {
+		m.confirmUpgrade = nil
+		switch msg.String() {
+		case "y", "Y", "enter":
+			return m, m.startInitUpgrade(p, true)
+		default:
+			return m, m.startInitUpgrade(p, false)
+		}
+	}
 	if m.focus == focusTasks {
 		return m, m.updateTaskKey(msg)
 	}
@@ -1041,7 +1057,7 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.focusNode(prev.rowID())
 		}
 	case key.Matches(msg, keys.InitUpgrade):
-		m.initUpgradeCurrent()
+		return m, m.initUpgradeCurrent()
 	case key.Matches(msg, keys.Refresh):
 		return m, m.refresh()
 	case key.Matches(msg, keys.RefreshWorkspaces):
@@ -1360,24 +1376,97 @@ func (m *Model) refreshWorkspaces() tea.Cmd {
 	return nil
 }
 
+// upgradePrompt is a pending `init -upgrade` over mods, where updates maps
+// the path of each module pinning a git module with a newer tag to the
+// source rewrites (old source → bumped source) that would adopt it.
+type upgradePrompt struct {
+	mods    []*domain.Module
+	updates map[string]map[string]string
+	nRefs   int
+}
+
 // initUpgradeCurrent queues `terraform init -upgrade` for the module(s) under
 // the cursor — one module, or every module in a repo (handy when lock files
-// aren't committed, so every root needs a periodic upgrade).
-func (m *Model) initUpgradeCurrent() {
+// aren't committed, so every root needs a periodic upgrade). When any of
+// them pins a git module that has a newer tag, it first asks whether to bump
+// those pins, since an upgrade is when they'd be adopted.
+func (m *Model) initUpgradeCurrent() tea.Cmd {
 	r, ok := m.currentRow()
 	if !ok {
-		return
+		return nil
 	}
+	p := &upgradePrompt{mods: m.modulesUnder(r), updates: map[string]map[string]string{}}
+	for _, mod := range p.mods {
+		if repl := deps.NewerTags(mod.Deps, m.behind); len(repl) > 0 {
+			p.updates[mod.Path] = repl
+			p.nRefs += len(repl)
+		}
+	}
+	if p.nRefs == 0 {
+		return m.startInitUpgrade(p, false)
+	}
+	m.confirmUpgrade = p
+	return nil
+}
+
+// startInitUpgrade carries out a prompt's init -upgrade: modules whose pins
+// are to be bumped get their sources rewritten first (the init follows in
+// refsUpdatedMsg, so it fetches the new refs); the rest are queued now.
+func (m *Model) startInitUpgrade(p *upgradePrompt, bump bool) tea.Cmd {
+	var cmds []tea.Cmd
 	n := 0
-	for _, mod := range m.modulesUnder(r) {
-		if m.runner.EnqueueInitUpgrade(mod) {
-			m.addTask(runner.KindInit, mod.Path)
+	for _, mod := range p.mods {
+		if repl := p.updates[mod.Path]; bump && len(repl) > 0 {
+			cmds = append(cmds, updateRefsCmd(mod, repl))
+			continue
+		}
+		if m.queueInitUpgrade(mod) {
 			n++
 		}
 	}
-	if n > 0 {
+	switch {
+	case len(cmds) > 0:
+		m.status = fmt.Sprintf("updating module references in %d module(s)…", len(cmds))
+	case n > 0:
 		m.status = fmt.Sprintf("queued init -upgrade for %d module(s)", n)
 	}
+	return tea.Batch(cmds...)
+}
+
+func (m *Model) queueInitUpgrade(mod *domain.Module) bool {
+	if !m.runner.EnqueueInitUpgrade(mod) {
+		return false
+	}
+	m.addTask(runner.KindInit, mod.Path)
+	return true
+}
+
+// updateRefsDone adopts a module's rewritten sources: its rescanned deps
+// replace the old pins (so the behind badge goes), the pins are re-checked
+// against the shared repo for their new refs, the fingerprint is refreshed
+// (the edit made every saved plan stale), and the init -upgrade that was
+// waiting on the rewrite is queued.
+func (m *Model) updateRefsDone(msg refsUpdatedMsg) tea.Cmd {
+	mod := m.findModule(msg.modulePath)
+	if mod == nil {
+		return nil
+	}
+	var cmds []tea.Cmd
+	if msg.err != nil {
+		m.status = "updating module references failed: " + msg.err.Error()
+	} else {
+		mod.Deps = msg.deps
+		m.status = fmt.Sprintf("updated %d module reference(s) in %d file(s) of %s", msg.refs, msg.files, mod.RelPath)
+		m.reflow()
+		for _, repo := range m.repos {
+			cmds = append(cmds, m.checkPinsCmd(repo, 0))
+		}
+		cmds = append(cmds, fingerprintCmd(mod, 0))
+	}
+	if m.queueInitUpgrade(mod) {
+		m.status += " — init -upgrade queued"
+	}
+	return tea.Batch(append(cmds, m.tickSpinner())...)
 }
 
 // planSelection plans marked workspaces, or everything under the cursor row.
@@ -1910,6 +1999,9 @@ func (m *Model) View() string {
 	}
 	if len(m.confirmApply) > 0 {
 		statusLeft = styleChanges.Render(fmt.Sprintf("apply %d plan(s) with changes in %s? (y/N)", len(m.confirmApply), m.confirmApplyLabel))
+	}
+	if p := m.confirmUpgrade; p != nil {
+		statusLeft = styleChanges.Render(fmt.Sprintf("update %d outdated module reference(s) to the newest tag before init -upgrade? (y/N — N upgrades as pinned)", p.nRefs))
 	}
 	var bottom string
 	if m.focus == focusFilter {
