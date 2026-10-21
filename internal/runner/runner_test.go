@@ -708,3 +708,30 @@ func TestOutputsChangedIgnoresNoOps(t *testing.T) {
 		t.Error("a created output is a change")
 	}
 }
+
+// A task that defers to init reports PhaseQueued, so a UI that flipped it to
+// running on dispatch shows it waiting again rather than executing.
+func TestDeferredTaskReportsQueued(t *testing.T) {
+	f := newFixture(t, 2)
+	m := f.newUninitModule(t, "mod1")
+	ws := &domain.Workspace{Module: m, Name: "prod"}
+	f.runner.EnqueuePlan(ws)
+	id := TaskID(KindPlan, ws.Key())
+	var phases []Phase
+	for {
+		ev := waitFor(t, f.runner.Events, func(e Event) bool { return e.TaskID() == id })
+		phases = append(phases, ev.Phase)
+		if ev.Phase.Terminal() {
+			break
+		}
+	}
+	want := []Phase{PhaseRunning, PhaseQueued, PhaseRunning, PhaseDone}
+	if len(phases) != len(want) {
+		t.Fatalf("phases = %v, want %v", phases, want)
+	}
+	for i := range want {
+		if phases[i] != want[i] {
+			t.Fatalf("phases = %v, want %v", phases, want)
+		}
+	}
+}

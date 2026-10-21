@@ -42,7 +42,8 @@ import (
 
 // taskState mirrors an in-flight runner task for display. A task is created
 // (queued) when the UI enqueues it, flipped to running on the runner's
-// PhaseRunning event, and removed on any terminal event.
+// PhaseRunning event, back to queued on PhaseQueued (it is waiting for an
+// init), and removed on any terminal event.
 type taskState struct {
 	kind    runner.Kind
 	key     string // module path (enumerate/init) or workspace key (plan/apply)
@@ -559,6 +560,12 @@ func (m *Model) updateRunnerEvent(ev runner.Event) tea.Cmd {
 		}
 		ts.running = true
 		return m.taskRunning(ev, ts)
+	}
+	if ev.Phase == runner.PhaseQueued {
+		if ts := m.tasks[id]; ts != nil {
+			ts.running = false
+		}
+		return nil
 	}
 	if ts := m.tasks[id]; ts != nil && (ts.running || ev.Phase != runner.PhaseCanceled) {
 		outcome, failed := taskOutcome(ev)

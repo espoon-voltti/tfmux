@@ -254,6 +254,16 @@ func TestQueuedVsRunningDistinction(t *testing.T) {
 	if !strings.Contains(v, "1 running") || !strings.Contains(v, "1 queued") {
 		t.Errorf("header should report 1 running, 1 queued: %q", firstLine(v))
 	}
+
+	// a gives its slot back to wait for an init: queued again, not running
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindPlan, Key: ka, ModulePath: mod.Path, Phase: runner.PhaseQueued})
+	v = m.View()
+	if ts := m.task(runner.KindPlan, ka); ts == nil || ts.running {
+		t.Fatal("PhaseQueued should mark the task queued but still in flight")
+	}
+	if strings.Contains(v, "planning") || !strings.Contains(v, "2 queued") {
+		t.Errorf("header should report 2 queued after the deferral: %q", firstLine(v))
+	}
 }
 
 // Canceling a queued plan clears its task immediately (the runner's later

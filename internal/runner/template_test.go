@@ -301,3 +301,45 @@ func TestApplyTemplateSkipsInitWhenMarkerMatches(t *testing.T) {
 		t.Errorf("marker changed by an apply that needed no init: %q, %v", ws, ok)
 	}
 }
+
+// Every workspace of a template module queued at once: each init serves the
+// workspace queued first, which then plans, so plans complete in queue order
+// and each one needs exactly one init. A deferred task that lost its queue
+// position would instead have its init claimed by the next workspace in line
+// and alternate finished and starved workspaces.
+func TestTemplateManyWorkspacesPlanInQueueOrder(t *testing.T) {
+	f := newFixture(t, 2)
+	m := f.newTemplateModule(t, "mod1", &domain.CommandTemplates{Init: wsInit, Plan: wsPlan})
+	m.ManifestWorkspaces = []string{"dev", "test", "prod", "hk-test", "hk-prod", "ka-test"}
+	for _, ws := range m.ManifestWorkspaces {
+		if !f.runner.EnqueuePlan(&domain.Workspace{Module: m, Name: ws}) {
+			t.Fatalf("enqueue %s refused", ws)
+		}
+	}
+	var order []string
+	for _, ev := range waitTerminal(t, f.runner.Events, KindPlan, len(m.ManifestWorkspaces)) {
+		if ev.Phase != PhaseDone {
+			t.Errorf("%s: phase = %v, err = %q", ev.Key, ev.Phase, ev.Err)
+		}
+		order = append(order, ev.Record.Workspace)
+	}
+	if got, want := strings.Join(order, " "), strings.Join(m.ManifestWorkspaces, " "); got != want {
+		t.Errorf("plans finished in order %q, want %q", got, want)
+	}
+	calls := f.fakeCalls(t)
+	if inits := initsFor(calls); len(inits) != len(m.ManifestWorkspaces) {
+		t.Errorf("inits = %v, want one per workspace", inits)
+	}
+	lastInit := ""
+	for _, c := range calls {
+		switch {
+		case strings.HasPrefix(c, "init "):
+			lastInit = c
+		case strings.HasPrefix(c, "plan "):
+			ws := strings.TrimSuffix(strings.TrimPrefix(strings.Fields(c)[1], "-var-file="), ".tfvars")
+			if !strings.Contains(lastInit, "-backend-config="+ws+".hcl") {
+				t.Errorf("plan for %s ran after %q", ws, lastInit)
+			}
+		}
+	}
+}
