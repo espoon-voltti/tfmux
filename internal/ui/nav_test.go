@@ -130,10 +130,11 @@ func TestRefreshWorkspacesReEnumerates(t *testing.T) {
 	drain(t, m, runner.KindEnumerate, 1) // let the async job finish before TempDir cleanup
 }
 
-// r fans out one gitStatusMsg (per repo) and one fingerprintMsg (per
-// non-ignored module) plus an expiredPlansMsg, all tagged with the same
-// refresh generation. The status bar should stay on "refreshing…" until every
-// one of them has reported back, then announce completion.
+// r rescans dependencies, then fans out one gitStatusMsg (per repo) and one
+// fingerprintMsg (per non-ignored module) plus an expiredPlansMsg, all tagged
+// with the same refresh generation. The status bar should stay on
+// "refreshing…" until every one of them has reported back, then announce
+// completion.
 func TestRefreshAnnouncesCompletion(t *testing.T) {
 	m, _ := fixtureModel(t) // one repo, one module (see fixtureModel)
 
@@ -142,6 +143,14 @@ func TestRefreshAnnouncesCompletion(t *testing.T) {
 
 	if m.status != "refreshing…" {
 		t.Fatalf("status = %q, want refreshing…", m.status)
+	}
+
+	_, cmd := m.Update(depsScannedMsg{gen: gen})
+	if cmd == nil {
+		t.Fatal("the dependency scan landing should fan out the status commands")
+	}
+	if m.status != "refreshing…" {
+		t.Fatalf("status = %q after depsScannedMsg, want still refreshing…", m.status)
 	}
 
 	m.Update(gitStatusMsg{repoPath: m.repos[0].Path, gen: gen})
@@ -167,6 +176,7 @@ func TestRefreshAnnouncesExpiredPlans(t *testing.T) {
 	m.refresh()
 	gen := m.refreshGen
 
+	m.Update(depsScannedMsg{gen: gen})
 	m.Update(gitStatusMsg{repoPath: m.repos[0].Path, gen: gen})
 	m.Update(fingerprintMsg{modulePath: m.repos[0].Modules[0].Path, fingerprint: "abc", gen: gen})
 	m.Update(expiredPlansMsg{n: 2, gen: gen})
@@ -187,7 +197,12 @@ func TestRefreshSupersedesPreviousGeneration(t *testing.T) {
 	m.refresh() // superseded before gen1 finished
 	gen2 := m.refreshGen
 
-	// A straggler from gen1 must not count toward gen2.
+	// A straggler from gen1 must not count toward gen2, and gen1's dependency
+	// scan must not fan out a second set of gen2 status commands.
+	_, cmd := m.Update(depsScannedMsg{gen: gen1})
+	if cmd != nil {
+		t.Fatal("a superseded dependency scan must not fan out")
+	}
 	m.Update(gitStatusMsg{repoPath: m.repos[0].Path, gen: gen1})
 	m.Update(fingerprintMsg{modulePath: m.repos[0].Modules[0].Path, fingerprint: "abc", gen: gen1})
 	m.Update(expiredPlansMsg{n: 0, gen: gen1})
@@ -195,6 +210,7 @@ func TestRefreshSupersedesPreviousGeneration(t *testing.T) {
 		t.Fatalf("stale gen1 messages completed the refresh: status = %q", m.status)
 	}
 
+	m.Update(depsScannedMsg{gen: gen2})
 	m.Update(gitStatusMsg{repoPath: m.repos[0].Path, gen: gen2})
 	m.Update(fingerprintMsg{modulePath: m.repos[0].Modules[0].Path, fingerprint: "abc", gen: gen2})
 	m.Update(expiredPlansMsg{n: 0, gen: gen2})

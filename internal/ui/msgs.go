@@ -102,6 +102,24 @@ func updateRefsCmd(mod *domain.Module, replace map[string]string) tea.Cmd {
 	}
 }
 
+// depsScannedMsg carries a fresh static scan of every visible module's
+// dependencies, keyed by module path. A refresh takes it before anything else
+// so that pins edited since discovery are checked at their current refs.
+type depsScannedMsg struct {
+	deps map[string]*domain.Deps
+	gen  int // refresh generation
+}
+
+func scanDepsCmd(mods []*domain.Module, gen int) tea.Cmd {
+	return func() tea.Msg {
+		out := make(map[string]*domain.Deps, len(mods))
+		for _, mod := range mods {
+			out[mod.Path] = deps.Scan(mod.Path, mod.Repo.Path)
+		}
+		return depsScannedMsg{deps: out, gen: gen}
+	}
+}
+
 type expiredPlansMsg struct {
 	n   int
 	gen int // refresh generation; 0 for non-refresh callers

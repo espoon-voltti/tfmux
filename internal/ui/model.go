@@ -300,6 +300,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, loadLogCmd(msg.id, msg.path)
 
+	case depsScannedMsg:
+		if msg.gen != m.refreshGen {
+			return m, nil
+		}
+		for path, d := range msg.deps {
+			if mod := m.findModule(path); mod != nil {
+				mod.Deps = d
+			}
+		}
+		m.reflow()
+		cmd := m.refreshStatuses(msg.gen)
+		m.noteRefreshDone(msg.gen)
+		return m, cmd
+
 	case expiredPlansMsg:
 		if msg.gen != 0 && msg.gen == m.refreshGen {
 			m.refreshExpired = msg.n
@@ -1699,11 +1713,27 @@ func (m *Model) toggleIgnore() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// refresh starts a new generation by rescanning the visible modules'
+// dependencies; the git-status, fingerprint and expiry fan-out follows in
+// refreshStatuses once that scan has landed, because the pin check spawned
+// from each git status reads the dependency index.
 func (m *Model) refresh() tea.Cmd {
 	m.refreshGen++
-	gen := m.refreshGen
-	m.refreshLeft = 0
+	m.refreshLeft = 1
 	m.refreshExpired = 0
+	m.status = "refreshing…"
+	var mods []*domain.Module
+	for _, repo := range m.repos {
+		for _, mod := range repo.Modules {
+			if !m.moduleHidden(mod) {
+				mods = append(mods, mod)
+			}
+		}
+	}
+	return scanDepsCmd(mods, m.refreshGen)
+}
+
+func (m *Model) refreshStatuses(gen int) tea.Cmd {
 	var cmds []tea.Cmd
 	for _, repo := range m.repos {
 		cmds = append(cmds, gitStatusCmd(m.git, repo.Path, gen))
@@ -1717,15 +1747,14 @@ func (m *Model) refresh() tea.Cmd {
 	}
 	cmds = append(cmds, expirePlansCmd(m.store, m.cfg.PlanTTLDuration(), gen))
 	m.refreshLeft++
-	m.status = "refreshing…"
 	return tea.Batch(cmds...)
 }
 
 // noteRefreshDone counts one refresh sub-command's completion toward the
-// current generation, announcing the terminal status once every gitStatus/
-// fingerprint/expiry command fanned out by refresh has reported in. gen 0
-// (non-refresh callers) and stragglers from a superseded generation are
-// no-ops.
+// current generation, announcing the terminal status once the dependency
+// scan and every gitStatus/fingerprint/expiry command fanned out by refresh
+// have reported in. gen 0 (non-refresh callers) and stragglers from a
+// superseded generation are no-ops.
 func (m *Model) noteRefreshDone(gen int) {
 	if gen == 0 || gen != m.refreshGen || m.refreshLeft == 0 {
 		return

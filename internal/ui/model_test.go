@@ -799,3 +799,31 @@ func TestInvalidatedPlanIsNotApplyable(t *testing.T) {
 		t.Errorf("status = %q", m.status)
 	}
 }
+
+// A pin edited in the sources since discovery (v16 → v18 by hand) is picked
+// up by r: the rescan replaces the module's deps, the index resolves the new
+// ref, and the badge computed against the old ref goes.
+func TestRefreshRescansEditedPins(t *testing.T) {
+	m, mod := fixtureModel(t)
+	mod.Deps = &domain.Deps{Git: []domain.GitRef{{Repo: "github.com/org/shared", Subdir: "modules/waf", Ref: "v16", Via: "waf"}}}
+	enumerated(t, m, mod, "prod")
+	m.reflow()
+	m.behind["github.com/org/shared//modules/waf@v16"] = deps.Behind{Ref: "v16", NewerTag: "v18"}
+	m.recountTree()
+	if !strings.Contains(m.View(), "↑ waf v16→v18") {
+		t.Fatal("precondition: badge shown for the old pin")
+	}
+
+	m.refresh()
+	m.Update(depsScannedMsg{gen: m.refreshGen, deps: map[string]*domain.Deps{
+		mod.Path: {Git: []domain.GitRef{{Repo: "github.com/org/shared", Subdir: "modules/waf", Ref: "v18", Via: "waf"}}},
+	}})
+
+	refs := m.index.RefsTo("github.com/org/shared")
+	if len(refs) != 1 || refs[0].Ref != "v18" {
+		t.Errorf("index should resolve the rescanned ref: %+v", refs)
+	}
+	if v := m.View(); strings.Contains(v, "v16→v18") {
+		t.Errorf("badge for the old pin should be gone:\n%s", v)
+	}
+}

@@ -102,7 +102,7 @@ same behind pins as `module-behind` rows. See [Dependencies](#dependencies).
 | `i` / `Z` | toggle ignore / show ignored |
 | `!` | pending only: show just the workspaces that need attention (`needs plan`, a saved plan with changes, a plan or apply error — what `tfmux pending` lists) and the modules with outdated pins, expanded. A snapshot: acting on an item doesn't drop it from the list; toggle off and on to refresh |
 | `I` | `terraform init -upgrade` for the module — or every module, on a repo row; when a pinned git module has a newer tag, asks first whether to bump the pin(s) in the `.tf` files |
-| `r` / `R` | refresh statuses / re-discover repos |
+| `r` / `R` | refresh statuses (git, fingerprints, pins, as at startup) / re-discover repos |
 | `w` | re-enumerate workspaces under the cursor (refreshes the cache) |
 | `/` | filter — repo/module-row actions (`p`, `A`, `x`, `I`, `w`) then only target what the filter (and `!`) leaves visible |
 | `?` | help, `q` quit |
@@ -172,11 +172,12 @@ same behind pins as `module-behind` rows. See [Dependencies](#dependencies).
   tfmux never fetches: `git fetch --tags` the shared repo first. A ref that
   isn't present locally shows as `ref not found locally`; a ref that already
   contains the newest tag (a branch, or a later commit) is never reported
-  behind it. Checked on discovery and on `r`. `I` on such a root offers to
-  rewrite the `source = "…"` attributes pinning an older tag to the newest
-  one (in the root's own `.tf` files and those of its in-repo local modules)
-  before the `init -upgrade` that would adopt them; the edit is uncommitted,
-  so review it with `git diff`.
+  behind it. Checked on discovery and on `r`, which rescans the pins first
+  so a `ref` edited by hand is compared at its new value. `I` on such a root
+  offers to rewrite the `source = "…"` attributes pinning an older tag to the
+  newest one (in the root's own `.tf` files and those of its in-repo local
+  modules) before the `init -upgrade` that would adopt them; the edit is
+  uncommitted, so review it with `git diff`.
 - **Applying an upstream root marks its downstream roots.** A plan records
   whether it changes outputs. When such a plan is applied, every planned
   workspace of a root that reads that state via `terraform_remote_state` (in
