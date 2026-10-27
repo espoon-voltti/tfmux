@@ -20,8 +20,8 @@
 //	        ├── run.json             RunRecord
 //	        ├── plan.tfplan          0600 — plan files embed secrets
 //	        ├── plan.log             captured plan output
-//	        ├── output.log           captured `terraform output`
-//	        └── apply.exit           written atomically by the tmux wrapper
+//	        ├── apply.log            captured apply output
+//	        └── output.log           captured `terraform output`
 //
 // All directories are 0700 and files 0600: plan files contain resolved
 // secret values and provider credentials.
@@ -57,14 +57,16 @@ func (s ChangeSummary) String() string {
 	return fmt.Sprintf("+%d ~%d -%d", s.Add, s.Change, s.Destroy)
 }
 
-// ApplyRecord tracks one apply launched in tmux.
+// ApplyRecord tracks one apply of the plan this record holds.
 type ApplyRecord struct {
 	Started  time.Time  `json:"started"`
 	Finished *time.Time `json:"finished,omitempty"`
-	ExitCode *int       `json:"exit_code,omitempty"` // nil while running/unknown
-	WindowID string     `json:"window_id,omitempty"` // tmux @window_id — display/debugging only, see Token
-	Token    string     `json:"token,omitempty"`     // durable identity stamped on the window; the only safe way to re-find it (window IDs get recycled across tmux server restarts)
-	Aborted  bool       `json:"aborted,omitempty"`   // window vanished without exit file
+	ExitCode *int       `json:"exit_code,omitempty"` // nil while running or when Aborted
+
+	// Aborted means terraform was interrupted (a cancel, or tfmux dying
+	// mid-apply) and the outcome is unknown: the plan may be partially
+	// applied and is no longer usable.
+	Aborted bool `json:"aborted,omitempty"`
 }
 
 // Invalidation records the upstream apply that made a plan's remote-state
@@ -198,12 +200,13 @@ func (s *Store) OutputLogPath(modulePath, workspace string) (string, error) {
 	return filepath.Join(dir, "output.log"), nil
 }
 
-func (s *Store) ApplyExitPath(modulePath, workspace string) (string, error) {
+// ApplyLogPath returns the path for a workspace's captured apply output.
+func (s *Store) ApplyLogPath(modulePath, workspace string) (string, error) {
 	dir, err := s.WorkspaceDir(modulePath, workspace)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "apply.exit"), nil
+	return filepath.Join(dir, "apply.log"), nil
 }
 
 // SaveRun persists the record as run.json (0600, atomic rename).

@@ -14,8 +14,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/espoon-voltti/tfmux/internal/paths"
 	"github.com/espoon-voltti/tfmux/internal/report"
 	"github.com/espoon-voltti/tfmux/internal/state"
+	"github.com/espoon-voltti/tfmux/internal/tfexec"
 	"github.com/espoon-voltti/tfmux/internal/ui"
 )
 
@@ -294,6 +297,27 @@ func runTUI() error {
 		return err
 	}
 	model := ui.NewModel(cfg, state.New(stateDir))
-	_, err = tea.NewProgram(model, tea.WithAltScreen()).Run()
-	return err
+	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	// Bubble Tea ends the program on SIGINT/SIGTERM itself. A hangup (the
+	// terminal went away) must end it the same way, so the shutdown below
+	// still gets to interrupt the running terraforms.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		if _, ok := <-hup; ok {
+			p.Quit()
+		}
+	}()
+
+	_, runErr := p.Run()
+	signal.Stop(hup)
+	close(hup)
+	if n := model.RunningTasks(); n > 0 {
+		fmt.Fprintf(os.Stderr, "tfmux: interrupting %d running task(s), waiting up to %s for terraform to stop…\n", n, tfexec.InterruptGrace)
+	}
+	if n := model.Shutdown(); n > 0 {
+		fmt.Fprintf(os.Stderr, "tfmux: %d task(s) did not stop in time and were killed; check for held state locks\n", n)
+	}
+	return runErr
 }

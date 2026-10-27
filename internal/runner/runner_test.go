@@ -35,7 +35,7 @@ func newFixtureInitLimit(t *testing.T, parallelism, initLimit int) *fixture {
 	t.Setenv("TFMUX_FAKE_LOG", logFile)
 	store := state.New(t.TempDir())
 	return &fixture{
-		runner:  New(parallelism, initLimit, store, nil),
+		runner:  New(parallelism, initLimit, store),
 		store:   store,
 		logFile: logFile,
 		bin:     bin,

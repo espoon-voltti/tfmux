@@ -12,7 +12,8 @@ import (
 )
 
 // ownProcessGroup makes cmd the leader of a new process group, so a shell
-// wrapper and everything it spawns can be interrupted together.
+// wrapper and everything it spawns can be interrupted together, and so a
+// hangup of tfmux's own process group never reaches the command directly.
 func ownProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }

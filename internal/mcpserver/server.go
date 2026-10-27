@@ -28,7 +28,7 @@ import (
 	"github.com/espoon-voltti/tfmux/internal/report"
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/state"
-	"github.com/espoon-voltti/tfmux/internal/tmuxctl"
+	"github.com/espoon-voltti/tfmux/internal/tfexec"
 )
 
 // Options configures New.
@@ -38,7 +38,6 @@ type Options struct {
 	AllTools bool        // register the write tools too
 	Version  string      // reported to clients
 	Log      *log.Logger // tool calls and outcomes; nil silences
-	Tmux     *tmuxctl.Ctl
 }
 
 // Server owns the discovered estate, one runner, and the MCP server built
@@ -47,7 +46,6 @@ type Server struct {
 	cfg      *config.Config
 	store    *state.Store
 	runner   *runner.Runner
-	tmux     *tmuxctl.Ctl
 	allTools bool
 	log      *log.Logger
 	mcp      *mcp.Server
@@ -60,10 +58,6 @@ type Server struct {
 	waitMu        sync.Mutex
 	waiters       map[string][]chan runner.Event
 	applyOutcomes map[string]applyOutcome // workspace key -> outcome awaiting its tool call
-
-	// launchHooks run on an apply's PhaseRunning event (keyed by workspace
-	// key) so the run record learns the tmux window before the apply ends.
-	launchHooks sync.Map
 }
 
 // New discovers the estate, starts the runner and registers the tools.
@@ -71,14 +65,9 @@ func New(ctx context.Context, o Options) (*Server, error) {
 	if o.Log == nil {
 		o.Log = log.New(discard{}, "", 0)
 	}
-	tmux := o.Tmux
-	if tmux == nil {
-		tmux = tmuxctl.New(o.Cfg.TmuxSession)
-	}
 	s := &Server{
 		cfg:           o.Cfg,
 		store:         o.Store,
-		tmux:          tmux,
 		allTools:      o.AllTools,
 		log:           o.Log,
 		waiters:       map[string][]chan runner.Event{},
@@ -87,7 +76,7 @@ func New(ctx context.Context, o Options) (*Server, error) {
 	if err := s.discover(ctx); err != nil {
 		return nil, err
 	}
-	s.runner = runner.New(o.Cfg.Parallelism, o.Cfg.EffectiveInitParallelism(), o.Store, tmux)
+	s.runner = runner.New(o.Cfg.Parallelism, o.Cfg.EffectiveInitParallelism(), o.Store)
 	go s.pump()
 	s.mcp = mcp.NewServer(&mcp.Implementation{Name: "tfmux", Version: o.Version}, &mcp.ServerOptions{
 		Instructions: instructions(o.AllTools),
@@ -103,18 +92,11 @@ func (discard) Write(p []byte) (int, error) { return len(p), nil }
 // MCP returns the server to serve over a transport.
 func (s *Server) MCP() *mcp.Server { return s.mcp }
 
-// Close cancels every task a tool call is waiting on.
+// Close interrupts every task, including applies no call waits on any more,
+// and waits for terraform to stop so no state lock is left held.
 func (s *Server) Close() {
-	s.waitMu.Lock()
-	keys := make([]string, 0, len(s.waiters))
-	for id := range s.waiters {
-		keys = append(keys, id)
-	}
-	s.waitMu.Unlock()
-	for _, id := range keys {
-		if _, key, ok := strings.Cut(id, ":"); ok {
-			s.runner.CancelKey(key)
-		}
+	if n := s.runner.Shutdown(tfexec.InterruptGrace + 5*time.Second); n > 0 {
+		s.logf("shutdown: %d task(s) still running after %s", n, tfexec.InterruptGrace)
 	}
 }
 
@@ -243,11 +225,6 @@ func fingerprint(ctx context.Context, mod *domain.Module) string {
 func (s *Server) pump() {
 	for ev := range s.runner.Events {
 		if !ev.Phase.Terminal() {
-			if ev.Kind == runner.KindApply && ev.Token != "" {
-				if hook, ok := s.launchHooks.Load(ev.Key); ok {
-					hook.(func(runner.Event))(ev)
-				}
-			}
 			continue
 		}
 		switch {
@@ -257,7 +234,7 @@ func (s *Server) pump() {
 				setWorkspaces(mod, ev.Workspaces)
 			}
 			s.mu.Unlock()
-		case ev.Kind == runner.KindApply && ev.Phase == runner.PhaseDone:
+		case ev.Kind == runner.KindApply && ev.Phase != runner.PhaseFailed:
 			outcome := s.finishApply(ev)
 			s.logf("apply %s: %s", ev.Key, outcome.status)
 			s.waitMu.Lock()
@@ -284,42 +261,28 @@ type applyOutcome struct {
 	marked []string // downstream workspace keys now needing a plan
 }
 
-// finishApply records an apply's end in its run record and, on success,
-// discards the plan file and marks downstream workspaces.
+// finishApply describes an apply's end (the runner has already saved its
+// record and discarded the plan file of a success) and, on success, marks
+// downstream workspaces.
 func (s *Server) finishApply(ev runner.Event) applyOutcome {
-	workspace := splitKey(ev.Key)
-	rec, _ := s.store.LoadRun(ev.ModulePath, workspace)
-	now := time.Now()
+	rec := ev.Record
 	var out applyOutcome
 	switch {
-	case ev.Aborted:
-		out.status = "apply window closed without finishing — state unknown, re-plan"
-		if rec != nil && rec.Apply != nil {
-			rec.Apply.Finished, rec.Apply.Aborted = &now, true
-			_ = s.store.SaveRun(rec)
-		}
-	case ev.ApplyExit == nil:
+	case rec == nil || rec.Apply == nil:
+		out.status = "apply canceled before it started"
+	case rec.Apply.Aborted:
+		out.status = "apply interrupted — state unknown, re-plan"
+	case rec.Apply.ExitCode == nil:
 		out.status = "apply ended without an exit code"
-	case *ev.ApplyExit != 0:
-		out.status = fmt.Sprintf("apply failed (exit %d) — its tmux window is left open for inspection", *ev.ApplyExit)
-		if rec != nil && rec.Apply != nil {
-			rec.Apply.Finished, rec.Apply.ExitCode = &now, ev.ApplyExit
-			_ = s.store.SaveRun(rec)
-		}
+	case *rec.Apply.ExitCode != 0:
+		out.status = fmt.Sprintf("apply failed (exit %d); its output follows", *rec.Apply.ExitCode)
 	default:
 		out.status = "applied"
-		if rec != nil && rec.Apply != nil {
-			rec.Apply.Finished, rec.Apply.ExitCode = &now, ev.ApplyExit
-			_ = s.store.SaveRun(rec)
+		s.mu.Lock()
+		if up := s.findModule(ev.ModulePath); up != nil {
+			out.marked = report.InvalidateDownstream(s.store, s.index, up, rec, *rec.Apply.Finished)
 		}
-		_ = s.store.DiscardPlan(ev.ModulePath, workspace)
-		if rec != nil {
-			s.mu.Lock()
-			if up := s.findModule(ev.ModulePath); up != nil {
-				out.marked = report.InvalidateDownstream(s.store, s.index, up, rec, now)
-			}
-			s.mu.Unlock()
-		}
+		s.mu.Unlock()
 		if len(out.marked) > 0 {
 			out.status += fmt.Sprintf("; %d downstream workspace(s) now need a plan: %s", len(out.marked), strings.Join(out.marked, ", "))
 		}
@@ -359,8 +322,9 @@ func (s *Server) findModule(path string) *domain.Module {
 
 // await registers interest in a task's terminal event, enqueues it, and
 // blocks until the event arrives or ctx ends, in which case the task is
-// cancelled. A task already in flight (enqueue returns false) is simply
-// waited for.
+// cancelled — except an apply, which a client going away must not interrupt
+// mid-flight; it runs on and pump records its outcome. A task already in
+// flight (enqueue returns false) is simply waited for.
 func (s *Server) await(ctx context.Context, kind runner.Kind, key string, enqueue func() bool) (runner.Event, error) {
 	id := runner.TaskID(kind, key)
 	ch := make(chan runner.Event, 1)
@@ -382,7 +346,9 @@ func (s *Server) await(ctx context.Context, kind runner.Kind, key string, enqueu
 		}
 		if len(s.waiters[id]) == 0 {
 			delete(s.waiters, id)
-			s.runner.Cancel(kind, key)
+			if kind != runner.KindApply {
+				s.runner.Cancel(kind, key)
+			}
 		}
 		s.waitMu.Unlock()
 		return runner.Event{}, ctx.Err()

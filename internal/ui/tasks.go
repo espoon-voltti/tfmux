@@ -126,8 +126,7 @@ func (m *Model) updateTaskKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// viewSelectedTask runs the unified view/attach action on the selected task:
-// attach for a live apply, otherwise follow the task's log.
+// viewSelectedTask follows the selected task's log.
 func (m *Model) viewSelectedTask() tea.Cmd {
 	tasks := m.sortedTasks()
 	i, ok := m.taskCursorIndex(tasks)
@@ -135,17 +134,11 @@ func (m *Model) viewSelectedTask() tea.Cmd {
 		return nil
 	}
 	ts := tasks[i]
-	switch ts.kind {
-	case runner.KindPlan, runner.KindApply:
-		return m.viewOrAttach(ts.key)
-	case runner.KindEnumerate, runner.KindInit, runner.KindOutput:
-		return m.openLog(ts.kind, ts.key)
-	}
-	return nil
+	return m.openLog(ts.kind, ts.key)
 }
 
-// cancelSelectedTask cancels (or, for a running apply, asks to kill) the task
-// under the pane cursor.
+// cancelSelectedTask cancels (or, for a running apply, asks to interrupt) the
+// task under the pane cursor.
 func (m *Model) cancelSelectedTask() {
 	tasks := m.sortedTasks()
 	i, ok := m.taskCursorIndex(tasks)
@@ -157,7 +150,7 @@ func (m *Model) cancelSelectedTask() {
 		return
 	}
 	if ts.kind == runner.KindApply && ts.running {
-		// killing a live apply terminates terraform mid-flight — confirm first
+		// interrupting a live apply stops terraform mid-flight — confirm first
 		m.confirmKill = runner.TaskID(ts.kind, ts.key)
 		return
 	}
@@ -166,24 +159,15 @@ func (m *Model) cancelSelectedTask() {
 	m.clampTaskCursor()
 }
 
-// killTask closes a running apply's tmux window. The runner's poll then sees
-// the window vanish and reports the apply aborted (state unknown).
+// killTask interrupts a running apply. The task stays listed until the
+// runner reports terraform stopped, when the apply is recorded as aborted.
 func (m *Model) killTask(id string) {
 	ts := m.tasks[id]
 	if ts == nil {
 		return
 	}
-	windowID, ok := m.tmux.WindowFor(ts.token)
-	if !ok {
-		m.status = "apply window is already gone"
-		return
-	}
-	if err := m.tmux.KillWindow(windowID); err != nil {
-		m.status = "kill failed: " + err.Error()
-		return
-	}
-	m.status = "killed apply window — will be marked aborted, re-plan"
-	m.clampTaskCursor()
+	m.runner.Cancel(ts.kind, ts.key)
+	m.status = "interrupting apply — terraform is stopping; re-plan afterwards"
 }
 
 // cancelQueuedTasks drops every queued (not-yet-running) task at once.
@@ -274,9 +258,6 @@ func (m *Model) renderTaskLine(ts *taskState, selected bool, width int) string {
 		line += "  " + styleDim.Render(humanDur(ts.started))
 	} else {
 		line += "  " + styleDim.Render("finished "+humanDur(ts.finished)+" ago")
-	}
-	if ts.kind == runner.KindApply && ts.running {
-		line += styleDim.Render("  (enter: attach)")
 	}
 	if selected {
 		plain := ansi.Strip(line)

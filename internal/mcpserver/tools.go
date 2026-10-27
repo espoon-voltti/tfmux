@@ -17,9 +17,7 @@ import (
 	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/report"
 	"github.com/espoon-voltti/tfmux/internal/runner"
-	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/tfexec"
-	"github.com/espoon-voltti/tfmux/internal/tmuxctl"
 )
 
 // register declares every tool. This is the one place that decides which
@@ -47,7 +45,7 @@ func (s *Server) register() {
 	}
 	destructive := &mcp.ToolAnnotations{DestructiveHint: boolp(true)}
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "apply", Annotations: destructive,
-		Description: "Apply a workspace's saved plan (must have changes, be on disk and not stale). Runs in tmux on the host and waits for the exit code."}, s.apply)
+		Description: "Apply a workspace's saved plan (must have changes, be on disk and not stale). Runs on the host and waits for it; returns the outcome and, on failure, terraform's output."}, s.apply)
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "init_upgrade", Annotations: destructive,
 		Description: "Run `terraform init -upgrade` for a module (rewrites its lock file)."}, s.initUpgrade)
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "discard_plan", Annotations: destructive,
@@ -433,17 +431,15 @@ func (s *Server) refresh(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}
 type ApplyOut struct {
 	Module    string `json:"module"`
 	Workspace string `json:"workspace"`
-	ExitCode  *int   `json:"exit_code,omitempty"` // nil when the window vanished without finishing
+	ExitCode  *int   `json:"exit_code,omitempty"` // nil when the apply was interrupted
 	Status    string `json:"status"`
+	Output    string `json:"output,omitempty"` // terraform's text, on failure
 }
 
 func (s *Server) apply(ctx context.Context, _ *mcp.CallToolRequest, in WorkspaceIn) (*mcp.CallToolResult, ApplyOut, error) {
 	ws, err := s.workspace(in)
 	if err != nil {
 		return nil, ApplyOut{}, err
-	}
-	if !tmuxctl.Available() {
-		return nil, ApplyOut{}, fmt.Errorf("tmux not found on the host — applies run in tmux windows")
 	}
 	mod := ws.Module
 	if s.runner.Running(ws.Key()) {
@@ -454,37 +450,35 @@ func (s *Server) apply(ctx context.Context, _ *mcp.CallToolRequest, in Workspace
 		return nil, ApplyOut{}, fmt.Errorf("%s//%s: %s", in.Module, in.Workspace, reason)
 	}
 	s.logf("apply %s//%s: start", in.Module, in.Workspace)
-	ev, err := s.awaitApply(ctx, ws, rec)
+	version := ""
+	if rec != nil {
+		version = rec.TFBinVersion
+	}
+	ev, err := s.await(ctx, runner.KindApply, ws.Key(), func() bool { return s.runner.EnqueueApply(ws, version) })
 	if err != nil {
 		return nil, ApplyOut{}, err
 	}
-	out := ApplyOut{Module: in.Module, Workspace: in.Workspace, ExitCode: ev.ApplyExit}
+	out := ApplyOut{Module: in.Module, Workspace: in.Workspace}
+	if ev.Record != nil && ev.Record.Apply != nil {
+		out.ExitCode = ev.Record.Apply.ExitCode
+	}
 	if outcome, ok := s.takeApplyOutcome(ws.Key()); ok {
 		out.Status = outcome.status
 	} else {
 		out.Status = fmt.Sprintf("apply %s: %s", ev.Phase, ev.Err)
 		s.logf("apply %s//%s: %s", in.Module, in.Workspace, out.Status)
 	}
-	return text(out.Status + "\n"), out, nil
-}
-
-// awaitApply runs an apply and records its launch (window id, token) in the
-// run record the way the TUI does, so a restart can re-adopt it.
-func (s *Server) awaitApply(ctx context.Context, ws *domain.Workspace, rec *state.RunRecord) (runner.Event, error) {
-	s.launchHooks.Store(ws.Key(), func(ev runner.Event) {
-		if rec != nil && ev.Token != "" {
-			rec.Apply = &state.ApplyRecord{Started: time.Now(), WindowID: ev.WindowID, Token: ev.Token}
-			_ = s.store.SaveRun(rec)
+	if out.ExitCode == nil || *out.ExitCode != 0 {
+		if logPath, err := s.store.ApplyLogPath(mod.Path, ws.Name); err == nil {
+			if data, err := os.ReadFile(logPath); err == nil {
+				out.Output = string(data)
+			}
 		}
-	})
-	defer s.launchHooks.Delete(ws.Key())
-	version := ""
-	if rec != nil {
-		version = rec.TFBinVersion
 	}
-	// Cancelling a running apply only detaches from it: terraform keeps
-	// running in its tmux window, as when the TUI quits.
-	return s.await(ctx, runner.KindApply, ws.Key(), func() bool { return s.runner.EnqueueApply(ws, version) })
+	if out.Output == "" {
+		return text(out.Status + "\n"), out, nil
+	}
+	return text(out.Status + "\n\n" + out.Output), out, nil
 }
 
 type InitOut struct {

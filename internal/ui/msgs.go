@@ -170,16 +170,30 @@ func waitForEvent(ch chan runner.Event) tea.Cmd {
 	}
 }
 
-func loadRunsCmd(store *state.Store, m *domain.Module, workspaces []string) tea.Cmd {
+// loadRunsCmd reads the workspaces' run records. A record whose apply never
+// finished belongs to a tfmux that died mid-apply, unless some other tfmux
+// is running a task in the module right now (busy): the former is settled
+// as aborted, since nothing can report its outcome any more.
+func loadRunsCmd(store *state.Store, m *domain.Module, workspaces []string, busy func(modulePath string) bool) tea.Cmd {
 	return func() tea.Msg {
 		msg := runsLoadedMsg{
 			modulePath: m.Path,
 			runs:       map[string]*state.RunRecord{},
 			planFiles:  map[string]bool{},
 		}
+		moduleBusy := false
 		for _, ws := range workspaces {
 			key := m.Path + "//" + ws
 			if rec, err := store.LoadRun(m.Path, ws); err == nil && rec != nil {
+				if a := rec.Apply; a != nil && a.ExitCode == nil && !a.Aborted {
+					if !moduleBusy {
+						moduleBusy = busy(m.Path)
+					}
+					if !moduleBusy {
+						a.Aborted = true
+						_ = store.SaveRun(rec)
+					}
+				}
 				msg.runs[key] = rec
 			}
 			msg.planFiles[key] = store.HasPlanFile(m.Path, ws)

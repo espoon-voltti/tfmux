@@ -17,3 +17,6 @@ import (
 func flockExclusive(_ context.Context, path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 }
+
+// flockHeld always reports false: without flock(2) there is no lock to probe.
+func flockHeld(string) bool { return false }

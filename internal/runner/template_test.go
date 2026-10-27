@@ -11,9 +11,6 @@ import (
 	"testing"
 
 	"github.com/espoon-voltti/tfmux/internal/domain"
-	"github.com/espoon-voltti/tfmux/internal/state"
-	"github.com/espoon-voltti/tfmux/internal/tftest"
-	"github.com/espoon-voltti/tfmux/internal/tmuxctl"
 )
 
 const (
@@ -220,82 +217,52 @@ func TestInitUpgradeTemplateUsesMarkerThenFirstWorkspace(t *testing.T) {
 	}
 }
 
-// tmuxFixture is a runner whose tmux records the apply window's script and
-// reports every window as gone, so a launched apply ends as aborted.
-type tmuxFixture struct {
-	*fixture
-	scripts []string
-}
-
-func newTmuxFixture(t *testing.T) *tmuxFixture {
+// applyCalls applies ws and returns the fake terraform calls it made.
+func (f *fixture) applyCalls(t *testing.T, m *domain.Module, ws string) []string {
 	t.Helper()
-	bin := tftest.Write(t, t.TempDir())
-	logFile := filepath.Join(t.TempDir(), "calls.log")
-	t.Setenv("TFMUX_FAKE_LOG", logFile)
-	store := state.New(t.TempDir())
-	tf := &tmuxFixture{}
-	tmux := tmuxctl.NewWithRunner("tfmux-test", func(args ...string) ([]byte, error) {
-		switch args[0] {
-		case "new-window":
-			tf.scripts = append(tf.scripts, args[len(args)-1])
-			return []byte("@1\n"), nil
-		}
-		return nil, nil
-	})
-	tf.fixture = &fixture{runner: New(1, 0, store, tmux), store: store, logFile: logFile, bin: bin}
-	return tf
-}
-
-func (f *tmuxFixture) apply(t *testing.T, m *domain.Module, ws string) string {
-	t.Helper()
+	f.readyPlan(t, m, ws)
 	if !f.runner.EnqueueApply(&domain.Workspace{Module: m, Name: ws}, "") {
 		t.Fatal("enqueue refused")
 	}
 	ev := waitTerminal(t, f.runner.Events, KindApply, 1)[0]
-	if ev.Phase != PhaseDone || !ev.Aborted {
-		t.Fatalf("phase = %v, aborted = %v, err = %q", ev.Phase, ev.Aborted, ev.Err)
+	if ev.Phase != PhaseDone || ev.Record == nil || ev.Record.Apply == nil || ev.Record.Apply.ExitCode == nil || *ev.Record.Apply.ExitCode != 0 {
+		t.Fatalf("phase = %v, err = %q, record = %+v", ev.Phase, ev.Err, ev.Record)
 	}
-	if len(f.scripts) != 1 {
-		t.Fatalf("launched %d windows", len(f.scripts))
-	}
-	return f.scripts[0]
+	return f.fakeCalls(t)
 }
 
-func TestApplyTemplateIncludesInitWhenMarkerMismatch(t *testing.T) {
-	f := newTmuxFixture(t)
+// An apply for a workspace the module dir is not initialised for defers to
+// an init for that workspace first, like a plan does.
+func TestApplyTemplateInitsForWorkspaceWhenMarkerMismatch(t *testing.T) {
+	f := newFixture(t, 1)
 	m := f.newTemplateModule(t, "mod1", &domain.CommandTemplates{Init: wsInit, Apply: wsApply})
+	if err := os.MkdirAll(filepath.Join(m.Path, ".terraform"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.store.SaveInitWorkspace(m.Path, "staging"); err != nil {
 		t.Fatal(err)
 	}
-	script := f.apply(t, m, "prod")
-	marker, _ := f.store.InitWorkspacePath(m.Path)
-	for _, frag := range []string{
-		"export TFMUX_WORKSPACE='prod'",
-		wsInit + " -input=false -no-color",
-		"> '" + marker + ".tmp'",
-		wsApply + " -input=false '",
-	} {
-		if !strings.Contains(script, frag) {
-			t.Errorf("script missing %q:\n%s", frag, script)
-		}
+	calls := f.applyCalls(t, m, "prod")
+	if len(calls) != 2 || !strings.HasPrefix(calls[0], "init -backend-config=prod.hcl") || !strings.HasPrefix(calls[1], "apply -input=false -no-color ") {
+		t.Errorf("calls = %v", calls)
 	}
-	if ws, ok := f.store.LoadInitWorkspace(m.Path); ok {
-		t.Errorf("marker not cleared before launching an apply that re-inits: %q", ws)
+	if ws, ok := f.store.LoadInitWorkspace(m.Path); !ok || ws != "prod" {
+		t.Errorf("marker after apply = %q, %v; want prod", ws, ok)
 	}
 }
 
 func TestApplyTemplateSkipsInitWhenMarkerMatches(t *testing.T) {
-	f := newTmuxFixture(t)
+	f := newFixture(t, 1)
 	m := f.newTemplateModule(t, "mod1", &domain.CommandTemplates{Init: wsInit, Apply: wsApply})
+	if err := os.MkdirAll(filepath.Join(m.Path, ".terraform"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.store.SaveInitWorkspace(m.Path, "prod"); err != nil {
 		t.Fatal(err)
 	}
-	script := f.apply(t, m, "prod")
-	if strings.Contains(script, "init ") {
-		t.Errorf("apply for the initialised workspace re-inits:\n%s", script)
-	}
-	if !strings.Contains(script, wsApply+" -input=false '") {
-		t.Errorf("script missing the apply template:\n%s", script)
+	calls := f.applyCalls(t, m, "prod")
+	if len(calls) != 1 || !strings.HasPrefix(calls[0], "apply -input=false -no-color ") {
+		t.Errorf("calls = %v", calls)
 	}
 	if ws, ok := f.store.LoadInitWorkspace(m.Path); !ok || ws != "prod" {
 		t.Errorf("marker changed by an apply that needed no init: %q, %v", ws, ok)

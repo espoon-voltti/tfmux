@@ -54,7 +54,7 @@ func Assess(rec *state.RunRecord, planFile bool, fingerprint string) []Reason {
 	if a := rec.Apply; a != nil {
 		switch {
 		case a.Aborted:
-			rs = append(rs, Reason{Code: ApplyAborted, Detail: "apply window closed without finishing"})
+			rs = append(rs, Reason{Code: ApplyAborted, Detail: "apply interrupted before finishing"})
 		case a.ExitCode != nil && *a.ExitCode != 0:
 			rs = append(rs, Reason{Code: ApplyFailed, Detail: fmt.Sprintf("exit %d", *a.ExitCode)})
 		case a.ExitCode != nil:

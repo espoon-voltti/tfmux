@@ -40,3 +40,15 @@ func flockExclusive(ctx context.Context, path string) (*os.File, error) {
 		}
 	}
 }
+
+// flockHeld reports whether another open file description currently holds
+// the exclusive lock on path. The probe takes and releases the lock when it
+// is free, so it must not be used by a process that itself holds it.
+func flockHeld(path string) bool {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == syscall.EWOULDBLOCK
+}

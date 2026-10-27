@@ -20,8 +20,10 @@
 //     silently override what tfmux itself decides
 //   - every command runs with -input=false so credential prompts fail fast
 //     instead of hanging a worker
+//   - every command runs in its own process group, so a hangup of tfmux's
+//     terminal reaches tfmux alone and tfmux decides how its children stop
 //   - cancellation sends SIGINT first (terraform releases state locks on
-//     SIGINT; SIGKILL leaks them), with a kill after a grace period
+//     SIGINT; SIGKILL leaks them), with a kill after InterruptGrace
 //
 // Callers must hold the per-module-directory lock (see internal/runner)
 // while invoking anything here: init mutates .terraform/. Deciding when a
@@ -70,6 +72,11 @@ type Result struct {
 	Output   []byte // combined stdout+stderr, in arrival order
 }
 
+// InterruptGrace is how long a canceled command gets to stop on SIGINT
+// before it is killed. Terraform finishes in-flight resource operations and
+// releases its state lock in that time; a kill leaks the lock.
+const InterruptGrace = time.Minute
+
 // run executes one terraform command. err is non-nil only for failures to
 // run at all (binary missing, context canceled); terraform's own non-zero
 // exits are reported via Result.ExitCode.
@@ -83,12 +90,10 @@ func (t TF) run(ctx context.Context, workspace string, args ...string) (Result, 
 }
 
 // runTemplate executes a manifest command template under /bin/sh with the
-// workspace exported as TFMUX_WORKSPACE. The shell gets its own process
-// group so cancellation reaches terraform, not just sh.
+// workspace exported as TFMUX_WORKSPACE.
 func (t TF) runTemplate(ctx context.Context, workspace, script string) (Result, error) {
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
 	cmd.Env = append(t.baseEnv(), "TFMUX_TF_BIN="+t.Bin, "TFMUX_WORKSPACE="+workspace)
-	ownProcessGroup(cmd)
 	return t.runCmd(ctx, cmd, "sh -c "+script)
 }
 
@@ -98,7 +103,9 @@ func (t TF) baseEnv() []string {
 }
 
 // runCmd runs a prepared command in the module dir, teeing output to Out.
-// desc names the command in the error for a failure to run at all.
+// desc names the command in the error for a failure to run at all. The
+// command gets its own process group so that cancellation reaches a template
+// shell's terraform, not just sh.
 func (t TF) runCmd(ctx context.Context, cmd *exec.Cmd, desc string) (Result, error) {
 	cmd.Dir = t.Dir
 	var buf bytes.Buffer
@@ -106,10 +113,12 @@ func (t TF) runCmd(ctx context.Context, cmd *exec.Cmd, desc string) (Result, err
 	if t.Out != nil {
 		sink = io.MultiWriter(&buf, t.Out) // tee live output to the caller
 	}
+	cmd.Stdin = nil
 	cmd.Stdout = sink
 	cmd.Stderr = sink
+	ownProcessGroup(cmd)
 	cmd.Cancel = func() error { return interrupt(cmd) }
-	cmd.WaitDelay = 15 * time.Second // SIGKILL if SIGINT didn't work
+	cmd.WaitDelay = InterruptGrace // SIGKILL if SIGINT didn't work
 
 	err := cmd.Run()
 	res := Result{Output: buf.Bytes()}
@@ -162,7 +171,7 @@ func PlanCommand(tmpl, outFile string) string {
 // ApplyCommand is the full shell line for an apply template applying
 // planFile.
 func ApplyCommand(tmpl, planFile string) string {
-	return tmpl + " -input=false " + ShellQuote(planFile)
+	return tmpl + " -input=false -no-color " + ShellQuote(planFile)
 }
 
 // OutputCommand is the full shell line for an output template.
@@ -322,6 +331,16 @@ func (t TF) Plan(ctx context.Context, workspace, outFile string) (Result, error)
 	}
 	return t.run(ctx, workspace,
 		"plan", "-input=false", "-no-color", "-detailed-exitcode", "-out="+outFile)
+}
+
+// Apply applies a saved plan file for one workspace. Callers are
+// responsible for initializing the module for that workspace first; a plan
+// file carries its variables, so none are passed here.
+func (t TF) Apply(ctx context.Context, workspace, planFile string) (Result, error) {
+	if t.Templates != nil {
+		return t.runTemplate(ctx, workspace, ApplyCommand(TemplateOr(t.Templates.Apply, "apply"), planFile))
+	}
+	return t.run(ctx, workspace, "apply", "-input=false", "-no-color", planFile)
 }
 
 // Output runs `terraform output` for one workspace, returning its plain-text

@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 // Package ui is the Bubble Tea TUI: a repo→module→workspace tree with
-// at-a-glance statuses, a detail viewport for plan logs, and keybindings to
-// orchestrate plans (headless, parallel) and applies (tmux windows).
+// at-a-glance statuses, a detail viewport for task logs, and keybindings to
+// orchestrate plans and applies (headless, parallel, one scheduler).
 //
 // Update is kept I/O-free: every side effect lives in a tea.Cmd (msgs.go) so
 // message → state transitions are directly unit-testable.
@@ -37,7 +37,6 @@ import (
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/tfexec"
-	"github.com/espoon-voltti/tfmux/internal/tmuxctl"
 )
 
 // taskState mirrors an in-flight runner task for display. A task is created
@@ -48,7 +47,6 @@ type taskState struct {
 	kind    runner.Kind
 	key     string // module path (enumerate/init) or workspace key (plan/apply)
 	running bool   // false: queued waiting for a slot; true: executing
-	token   string // apply: the tmux window's durable identity — see tmuxctl.WindowFor
 	started time.Time
 
 	// Set once the task has finished and moved to Model.done.
@@ -72,8 +70,6 @@ type Model struct {
 	store  *state.Store
 	runner *runner.Runner
 	git    gitstatus.Client
-	tmux   *tmuxctl.Ctl
-	tmuxOK bool
 
 	repos        []*domain.Repo
 	ignore       state.Ignore
@@ -134,7 +130,7 @@ type Model struct {
 	done         map[string]*taskState
 	taskCursorID string    // TaskID of the selection in the task pane — not a bare index, see taskCursorIndex
 	detailReturn focusArea // where esc from the detail view goes back to
-	confirmKill  string    // task id awaiting kill confirmation (running apply)
+	confirmKill  string    // task id awaiting interrupt confirmation (running apply)
 
 	// confirmApply holds the applyable workspaces awaiting confirmation for a
 	// mass apply over a repo/module row (confirmApplyLabel names the scope).
@@ -155,14 +151,11 @@ func NewModel(cfg *config.Config, store *state.Store) *Model {
 	fi := textinput.New()
 	fi.Placeholder = "filter…"
 	fi.Prompt = "/"
-	tmux := tmuxctl.New(cfg.TmuxSession)
 	return &Model{
 		cfg:          cfg,
 		store:        store,
-		runner:       runner.New(cfg.Parallelism, cfg.EffectiveInitParallelism(), store, tmux),
+		runner:       runner.New(cfg.Parallelism, cfg.EffectiveInitParallelism(), store),
 		git:          gitstatus.CLI{},
-		tmux:         tmux,
-		tmuxOK:       tmuxctl.Available(),
 		runs:         map[string]*state.RunRecord{},
 		planFiles:    map[string]bool{},
 		tasks:        map[string]*taskState{},
@@ -270,14 +263,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for k, v := range msg.planFiles {
 			m.planFiles[k] = v
 		}
-		// re-adopt applies that were still running in tmux when tfmux exited
-		for _, rec := range msg.runs {
-			if rec.Apply != nil && rec.Apply.ExitCode == nil && !rec.Apply.Aborted {
-				if m.runner.EnqueueApplyPoll(rec.ModulePath, rec.Workspace, rec.Apply.Token) {
-					m.addTask(runner.KindApply, rec.ModulePath+"//"+rec.Workspace)
-				}
-			}
-		}
 		m.reflow()
 		return m, m.tickSpinner()
 
@@ -361,12 +346,12 @@ func (m *Model) updateDiscovery(msg discoveryMsg) (tea.Model, tea.Cmd) {
 				// The repo manifest is authoritative for listed modules: no
 				// backend enumeration, ever — not even on a forced rediscover.
 				m.applyWorkspaces(mod, mod.ManifestWorkspaces)
-				cmds = append(cmds, loadRunsCmd(m.store, mod, mod.ManifestWorkspaces))
+				cmds = append(cmds, m.loadRuns(mod, mod.ManifestWorkspaces))
 			} else if cache, ok := m.store.LoadWorkspaces(mod.Path); ok && !msg.force {
 				// Prefer the cached enumeration: listing workspaces hits the
 				// backend and is slow/rate-limited. Refresh is explicit (w / R).
 				m.applyWorkspaces(mod, cache.Workspaces)
-				cmds = append(cmds, loadRunsCmd(m.store, mod, cache.Workspaces))
+				cmds = append(cmds, m.loadRuns(mod, cache.Workspaces))
 			} else if m.runner.EnqueueEnumerate(mod) {
 				m.addTask(runner.KindEnumerate, mod.Path)
 			}
@@ -486,7 +471,7 @@ func (m *Model) updateManifestReloaded(msg manifestReloadedMsg) (tea.Model, tea.
 		mod.ManifestWorkspaces = entry.Workspaces
 		mod.Templates = discovery.TemplatesFor(entry)
 		m.applyWorkspaces(mod, entry.Workspaces)
-		cmds = append(cmds, loadRunsCmd(m.store, mod, entry.Workspaces))
+		cmds = append(cmds, m.loadRuns(mod, entry.Workspaces))
 	}
 	sort.Slice(repo.Modules, func(i, j int) bool { return repo.Modules[i].RelPath < repo.Modules[j].RelPath })
 	m.status = "workspace manifest reloaded"
@@ -552,13 +537,31 @@ func (m *Model) hasTask(kind runner.Kind, key string) bool {
 	return m.tasks[runner.TaskID(kind, key)] != nil
 }
 
-func (m *Model) anyTask(kind runner.Kind) bool {
+// runningTasks counts tasks that are executing, as opposed to queued.
+func (m *Model) runningTasks() int {
+	n := 0
 	for _, ts := range m.tasks {
-		if ts.kind == kind {
-			return true
+		if ts.running {
+			n++
 		}
 	}
-	return false
+	return n
+}
+
+// RunningTasks reports how many tasks were executing when the program loop
+// ended, for the caller to announce before Shutdown.
+func (m *Model) RunningTasks() int { return m.runningTasks() }
+
+// Shutdown interrupts every running task and waits for terraform to stop,
+// returning how many tasks had to be killed. Call it after the program loop
+// has returned.
+func (m *Model) Shutdown() int {
+	return m.runner.Shutdown(tfexec.InterruptGrace + 5*time.Second)
+}
+
+// loadRuns reads the workspaces' run records; see loadRunsCmd.
+func (m *Model) loadRuns(mod *domain.Module, workspaces []string) tea.Cmd {
+	return loadRunsCmd(m.store, mod, workspaces, m.runner.ModuleBusy)
 }
 
 // updateRunnerEvent folds a task lifecycle transition into the model: running
@@ -604,29 +607,20 @@ func taskOutcome(ev runner.Event) (label string, failed bool) {
 		return "canceled", false
 	case ev.Phase == runner.PhaseFailed:
 		return "✗ failed", true
-	case ev.Kind == runner.KindApply && ev.Aborted:
-		return "✗ aborted", true
-	case ev.Kind == runner.KindApply && ev.ApplyExit != nil && *ev.ApplyExit != 0:
-		return fmt.Sprintf("✗ exit %d", *ev.ApplyExit), true
+	case ev.Kind == runner.KindApply && ev.Record != nil && ev.Record.Apply != nil && ev.Record.Apply.ExitCode != nil && *ev.Record.Apply.ExitCode != 0:
+		return fmt.Sprintf("✗ exit %d", *ev.Record.Apply.ExitCode), true
 	case ev.Kind == runner.KindPlan && ev.Record != nil && ev.Record.PlanExitCode == tfexec.PlanError:
 		return "✗ failed", true
 	}
 	return "✓ done", false
 }
 
-func (m *Model) taskRunning(ev runner.Event, ts *taskState) tea.Cmd {
+func (m *Model) taskRunning(ev runner.Event, _ *taskState) tea.Cmd {
 	switch ev.Kind {
 	case runner.KindInit:
 		m.status = "init running…"
 	case runner.KindApply:
-		if ev.Token != "" {
-			ts.token = ev.Token
-			if rec := m.runs[ev.Key]; rec != nil {
-				rec.Apply = &state.ApplyRecord{Started: time.Now(), WindowID: ev.WindowID, Token: ev.Token}
-				m.status = "apply launched in tmux — press enter to attach"
-				return saveRunCmd(m.store, rec)
-			}
-		}
+		m.status = "applying — enter follows the log"
 	}
 	return nil
 }
@@ -660,7 +654,7 @@ func (m *Model) enumerateDone(ev runner.Event) tea.Cmd {
 	case runner.PhaseDone:
 		m.applyWorkspaces(mod, ev.Workspaces)
 		m.reflow()
-		return loadRunsCmd(m.store, mod, ev.Workspaces)
+		return m.loadRuns(mod, ev.Workspaces)
 	case runner.PhaseCanceled:
 		m.reflow()
 	}
@@ -722,41 +716,40 @@ func (m *Model) planDone(ev runner.Event) tea.Cmd {
 	return nil
 }
 
+// applyDone folds the runner's saved record in. The runner has already
+// persisted it and discarded the plan file of a successful apply.
 func (m *Model) applyDone(ev runner.Event) tea.Cmd {
+	if ev.Record != nil {
+		m.runs[ev.Key] = ev.Record
+		defer m.recountTree()
+	}
 	switch ev.Phase {
 	case runner.PhaseFailed:
 		m.status = firstLine(ev.Err)
 		return nil
 	case runner.PhaseCanceled:
-		m.status = "apply canceled before launch"
-		return nil
-	}
-	rec := m.runs[ev.Key]
-	if rec == nil || rec.Apply == nil {
-		return nil
-	}
-	now := time.Now()
-	rec.Apply.Finished = &now
-	defer m.recountTree()
-	switch {
-	case ev.Aborted:
-		rec.Apply.Aborted = true
-		m.status = "apply window closed without finishing — state unknown, re-plan"
-	case ev.ApplyExit != nil:
-		rec.Apply.ExitCode = ev.ApplyExit
-		if *ev.ApplyExit == 0 {
-			m.planFiles[ev.Key] = false
-			m.status = fmt.Sprintf("applied %s//%s ✓", rec.ModulePath, rec.Workspace)
-			cmds := []tea.Cmd{saveRunCmd(m.store, rec), discardPlanCmd(m.store, rec.ModulePath, rec.Workspace)}
-			if n, downstream := m.invalidateDownstream(rec, now); n > 0 {
-				m.status += fmt.Sprintf(" — %d downstream workspace(s) need plan", n)
-				cmds = append(cmds, downstream...)
-			}
-			return tea.Batch(cmds...)
+		if ev.Record != nil && ev.Record.Apply != nil && ev.Record.Apply.Aborted {
+			m.status = "apply interrupted — state unknown, re-plan"
+		} else {
+			m.status = "apply canceled before it started"
 		}
-		m.status = fmt.Sprintf("apply failed (exit %d) — press enter to inspect the tmux window", *ev.ApplyExit)
+		return nil
 	}
-	return saveRunCmd(m.store, rec)
+	rec := ev.Record
+	if rec == nil || rec.Apply == nil || rec.Apply.ExitCode == nil {
+		return nil
+	}
+	if *rec.Apply.ExitCode != 0 {
+		m.status = fmt.Sprintf("apply failed (exit %d) — enter views the log", *rec.Apply.ExitCode)
+		return nil
+	}
+	m.planFiles[ev.Key] = false
+	m.status = fmt.Sprintf("applied %s//%s ✓", rec.ModulePath, rec.Workspace)
+	if n, downstream := m.invalidateDownstream(rec, *rec.Apply.Finished); n > 0 {
+		m.status += fmt.Sprintf(" — %d downstream workspace(s) need plan", n)
+		return tea.Batch(downstream...)
+	}
+	return nil
 }
 
 // invalidateDownstream marks the in-memory records of the applied
@@ -800,6 +793,12 @@ func (m *Model) logPath(kind runner.Kind, key string) (string, error) {
 			return "", fmt.Errorf("bad workspace key %q", key)
 		}
 		return m.store.PlanLogPath(mp, ws)
+	case runner.KindApply:
+		mp, ws, ok := splitWSKey(key)
+		if !ok {
+			return "", fmt.Errorf("bad workspace key %q", key)
+		}
+		return m.store.ApplyLogPath(mp, ws)
 	case runner.KindOutput:
 		mp, ws, ok := splitWSKey(key)
 		if !ok {
@@ -844,10 +843,11 @@ func (m *Model) openLog(kind runner.Kind, key string) tea.Cmd {
 	}
 	m.detailTitle = m.detailTitleFor(kind, key)
 	id := runner.TaskID(kind, key)
-	// A plan log's payload is at the end: the add/change/destroy summary (and,
-	// for a small plan, the whole thing). Open it scrolled to the bottom so
-	// that's what the user lands on, past the state-refresh chatter.
-	m.detailBottom = kind == runner.KindPlan
+	// A plan or apply log's payload is at the end: the add/change/destroy
+	// summary (and, for a small plan, the whole thing). Open it scrolled to
+	// the bottom so that's what the user lands on, past the state-refresh
+	// chatter.
+	m.detailBottom = kind == runner.KindPlan || kind == runner.KindApply
 	m.detailFollow = ""
 	if m.hasTask(kind, key) {
 		m.detailFollow = id
@@ -987,7 +987,7 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showHelp = false
 			return m, nil
 		}
-		if m.anyTask(runner.KindPlan) {
+		if m.runningTasks() > 0 {
 			m.confirmQuit = true
 			return m, nil
 		}
@@ -1047,7 +1047,7 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if r, ok := m.currentRow(); ok {
 			switch r.kind {
 			case rowWorkspace:
-				return m, m.viewOrAttach(r.ws.Key())
+				return m, m.viewWorkspace(r.ws.Key())
 			case rowModule:
 				return m, m.viewModule(r.mod)
 			}
@@ -1635,17 +1635,29 @@ func (m *Model) cancelCurrent() {
 			keys = append(keys, ws.Key())
 		}
 	}
+	// A running apply is never interrupted from the tree: that takes the
+	// task pane's explicit confirmation, so a stray x can't stop terraform
+	// mid-apply.
+	skippedApplies := 0
 	for _, k := range keys {
-		m.runner.CancelKey(k)
 		for _, kind := range []runner.Kind{runner.KindEnumerate, runner.KindInit, runner.KindPlan, runner.KindApply, runner.KindOutput} {
+			if ts := m.task(kind, k); ts != nil && kind == runner.KindApply && ts.running {
+				skippedApplies++
+				continue
+			}
+			m.runner.Cancel(kind, k)
 			m.forgetTask(kind, k)
 		}
+	}
+	if skippedApplies > 0 {
+		m.status = fmt.Sprintf("%d running apply(ies) left alone — interrupt them from the task pane (T, x)", skippedApplies)
 	}
 }
 
 // forgetTask optimistically drops an in-flight task so the UI reacts to a
 // cancel immediately (the runner's Canceled event is then a no-op). A running
-// apply is kept — it lives on in tmux and is left attached.
+// apply stays until the runner reports it stopped: terraform shuts down
+// gracefully, and the outcome is only known then.
 func (m *Model) forgetTask(kind runner.Kind, key string) {
 	ts := m.task(kind, key)
 	if ts == nil || (kind == runner.KindApply && ts.running) {
@@ -1664,7 +1676,7 @@ func (m *Model) forgetTask(kind runner.Kind, key string) {
 func (m *Model) revealModule(mod *domain.Module) tea.Cmd {
 	if mod.ManifestListed {
 		m.applyWorkspaces(mod, mod.ManifestWorkspaces)
-		return loadRunsCmd(m.store, mod, mod.ManifestWorkspaces)
+		return m.loadRuns(mod, mod.ManifestWorkspaces)
 	}
 	if mod.WorkspaceState == domain.WorkspacesUnknown && m.runner.EnqueueEnumerate(mod) {
 		m.addTask(runner.KindEnumerate, mod.Path)
@@ -1779,10 +1791,6 @@ func (m *Model) applyCurrent() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	if !m.tmuxOK {
-		m.status = "tmux not found — applies run in tmux windows. Install it: brew install tmux"
-		return nil
-	}
 	switch r.kind {
 	case rowWorkspace:
 		return m.applyWorkspace(r.ws)
@@ -1806,8 +1814,7 @@ func (m *Model) applyWorkspace(ws *domain.Workspace) tea.Cmd {
 		m.status = reason
 		return nil
 	}
-	// The runner launches the tmux window, guards the binary version, and
-	// watches the apply to completion while holding a pool slot.
+	// The runner guards the binary version and records the outcome.
 	if m.runner.EnqueueApply(ws, m.runs[key].TFBinVersion) {
 		m.addTask(runner.KindApply, key)
 		m.status = "apply queued"
@@ -1869,41 +1876,32 @@ func (m *Model) enqueueApplies(targets []*domain.Workspace) tea.Cmd {
 		}
 	}
 	if n > 0 {
-		m.status = fmt.Sprintf("queued %d apply(ies) in tmux", n)
+		m.status = fmt.Sprintf("queued %d apply(ies)", n)
 	} else {
 		m.status = "nothing to apply"
 	}
 	return nil
 }
 
-// liveApplyWindow returns the token of the apply window to attach to for a
-// workspace, when one is worth attaching to: an apply running now, or a
-// failed apply whose window the wrapper kept open for inspection. A
-// clean/aborted apply has no live window.
-//
-// A token, not a raw window ID, identifies the window: see
-// tmuxctl.WindowFor. A record with no token predates this fix (or the token
-// was never persisted) and no longer has a safely-resolvable window.
-func (m *Model) liveApplyWindow(key string) (string, bool) {
-	if ts := m.task(runner.KindApply, key); ts != nil && ts.token != "" {
-		return ts.token, true
-	}
-	if rec := m.runs[key]; rec != nil && rec.Apply != nil && !rec.Apply.Aborted && rec.Apply.Token != "" {
-		if rec.Apply.ExitCode != nil && *rec.Apply.ExitCode != 0 {
-			return rec.Apply.Token, true
-		}
-	}
-	return "", false
+// viewWorkspace is the "show me what's happening" action for a workspace:
+// open (and, while it runs, follow) the log of its latest activity.
+func (m *Model) viewWorkspace(key string) tea.Cmd {
+	return m.openLog(m.viewKind(key), key)
 }
 
-// viewOrAttach is the unified "show me what's happening" action for a
-// workspace: attach to its live apply window if there is one, otherwise open
-// (and, while a plan runs, follow) its plan log.
-func (m *Model) viewOrAttach(key string) tea.Cmd {
-	if token, ok := m.liveApplyWindow(key); ok {
-		return m.attachWindow(token)
+// viewKind picks the log that shows a workspace's latest activity: an apply
+// in flight wins over everything; then a plan in flight; then a recorded
+// apply, which a new plan would have replaced; else the plan log.
+func (m *Model) viewKind(key string) runner.Kind {
+	switch rec := m.runs[key]; {
+	case m.hasTask(runner.KindApply, key):
+		return runner.KindApply
+	case m.hasTask(runner.KindPlan, key):
+		return runner.KindPlan
+	case rec != nil && rec.Apply != nil:
+		return runner.KindApply
 	}
-	return m.openLog(runner.KindPlan, key)
+	return runner.KindPlan
 }
 
 // showOutput runs `terraform output` for a workspace (unless already in
@@ -1959,32 +1957,6 @@ func (m *Model) enterDetail() {
 	m.focus = focusDetail
 }
 
-// attachWindow resolves token to whatever window currently carries it (it
-// may have moved to a different window ID since it was recorded, or vanished
-// entirely) and attaches there. It never attaches "blind" to a stale ID.
-func (m *Model) attachWindow(token string) tea.Cmd {
-	if !m.tmuxOK {
-		m.status = "tmux not found — install it: brew install tmux"
-		return nil
-	}
-	windowID, ok := m.tmux.WindowFor(token)
-	if !ok {
-		m.status = "apply window is gone — it may already have closed"
-		return nil
-	}
-	cmd, err := m.tmux.AttachCmd(windowID)
-	if err != nil {
-		m.status = "tmux attach: " + err.Error()
-		return nil
-	}
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		if err != nil {
-			return statusMsg{text: "tmux attach: " + err.Error()}
-		}
-		return statusMsg{text: ""}
-	})
-}
-
 // --- view ---
 
 // headerContext is the title-bar context for the current screen: the data scale
@@ -2008,7 +1980,7 @@ func (m *Model) headerContext() string {
 }
 
 // renderHeader builds the title bar: the app name, the screen context, then dim
-// meta (discovery/task tallies, tmux availability).
+// meta (discovery/task tallies).
 func (m *Model) renderHeader() string {
 	var meta []string
 	if m.discovering {
@@ -2040,9 +2012,6 @@ func (m *Model) renderHeader() string {
 	}
 	if m.pending != nil {
 		meta = append(meta, styleChanges.Render("pending only"))
-	}
-	if !m.tmuxOK {
-		meta = append(meta, styleError.Render("tmux: unavailable"))
 	}
 	parts := []string{styleTitle.Render("tfmux")}
 	if ctx := m.headerContext(); ctx != "" {
@@ -2078,10 +2047,10 @@ func (m *Model) View() string {
 
 	statusLeft := m.status
 	if m.confirmQuit {
-		statusLeft = styleChanges.Render("plans still running — quit anyway? (y/N)")
+		statusLeft = styleChanges.Render(fmt.Sprintf("%d task(s) still running — quit anyway? they will be interrupted (y/N)", m.runningTasks()))
 	}
 	if m.confirmKill != "" {
-		statusLeft = styleChanges.Render("kill running apply? terraform is mid-apply — risks partial state + held lock (y/N)")
+		statusLeft = styleChanges.Render("interrupt running apply? terraform stops after in-flight operations; the plan is then unusable — re-plan (y/N)")
 	}
 	if len(m.confirmApply) > 0 {
 		statusLeft = styleChanges.Render(fmt.Sprintf("apply %d plan(s) with changes in %s? (y/N)", len(m.confirmApply), m.confirmApplyLabel))

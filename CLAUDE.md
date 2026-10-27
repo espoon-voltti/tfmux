@@ -57,7 +57,6 @@ build one with `internal/gittest` (fixed identity, no user config).
 - `internal/runner` — the task scheduler (enumerate/init/plan/apply as tasks on
   one bounded worker pool, prioritized queue).
 - `internal/tfexec` — builds/runs terraform (or OpenTofu) commands.
-- `internal/tmuxctl` — drives tmux for applies.
 - `internal/state` — persists machine-owned state under XDG state dir.
 - `internal/config` / `internal/paths` — TOML config and XDG path resolution.
 - `internal/gitstatus` — branch/dirty/ahead-behind snapshot, and the per-module
@@ -118,6 +117,12 @@ consequences:
   a visited set.
 - **Version guard:** plan files aren't portable across terraform/tofu versions;
   apply refuses a different binary than the one used at plan time.
+- **Nothing outlives tfmux.** Every terraform is a child in its own process
+  group; applies are not detached, re-adopted or run under tmux. Exiting the
+  TUI or the MCP server goes through `runner.Shutdown`, which SIGINTs running
+  tasks and waits `tfexec.InterruptGrace` for terraform to release its state
+  locks. Don't add a detach path for one kind: plan and apply behave the same
+  on quit.
 
 ## Licensing (REUSE)
 

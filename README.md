@@ -43,16 +43,17 @@ tfmux
   parallelism (`terraform plan -detailed-exitcode -out=…`); same-module jobs
   are serialized, workspaces are selected via `TF_WORKSPACE` so your shell's
   selected workspace is never touched.
-- **Applies run in tmux**: `A` applies the saved plan file in a new window
-  of a dedicated tmux session — interactive (answers prompts), attachable
-  (`t`), and it survives tfmux exiting. Success closes the window; failures
-  keep it open for inspection until the next apply of the same workspace.
+- **Applies are tasks too**: `A` applies the saved plan file on the same
+  scheduler, with the same live log (`enter`) as a plan. The log is kept
+  after the apply, successful or not. Quitting tfmux interrupts whatever is
+  running and waits for terraform to stop, so no state lock is left held;
+  run tfmux inside tmux or screen if you need an apply to outlive your
+  terminal.
 
 ## Install
 
 ```sh
 go install github.com/espoon-voltti/tfmux/cmd/tfmux@latest
-brew install tmux   # only needed for applies; everything else works without
 ```
 
 Run `tfmux init` in the directory your infra repos are checked out under (or
@@ -93,11 +94,11 @@ same behind pins as `module-behind` rows. See [Dependencies](#dependencies).
 | `←/→` `h/l` | collapse / expand |
 | `space` | mark workspace for bulk plan |
 | `p` / `P` | plan marked-or-cursor / plan all visible |
-| `x` | cancel/kill task (queued → dropped; running → SIGINT; running apply → confirm, then kill its tmux window) |
-| `T` | task pane: in-flight tasks, then tasks finished this session (newest first; `enter` views their logs); `x` cancel/kill, `X` cancel all queued |
-| `enter` | see what's happening: attach to a live apply (tmux; detach with `C-b d`), else view the plan log — following it live while the plan runs |
+| `x` | cancel/interrupt task (queued → dropped; running → SIGINT, terraform stops gracefully; a running apply only from the task pane, after confirming) |
+| `T` | task pane: in-flight tasks, then tasks finished this session (newest first; `enter` views their logs); `x` cancel/interrupt, `X` cancel all queued |
+| `enter` | see what's happening: view the workspace's latest log — the apply's if one is running or was the last thing done, else the plan's — following it live while the task runs |
 | `o` | show `terraform output` for the workspace |
-| `A` | apply saved plan in tmux — on a module/repo row, confirm then mass-apply every contained workspace whose plan has outstanding changes |
+| `A` | apply saved plan — on a module/repo row, confirm then mass-apply every contained workspace whose plan has outstanding changes |
 | `d` | discard saved plan file |
 | `i` / `Z` | toggle ignore / show ignored |
 | `!` | pending only: show just the workspaces that need attention (`needs plan`, a saved plan with changes, a plan or apply error — what `tfmux pending` lists) and the modules with outdated pins, expanded. A snapshot: acting on an item doesn't drop it from the list; toggle off and on to refresh |
@@ -105,7 +106,7 @@ same behind pins as `module-behind` rows. See [Dependencies](#dependencies).
 | `r` / `R` | refresh statuses (git, fingerprints, pins, as at startup) / re-discover repos |
 | `w` | re-enumerate workspaces under the cursor (refreshes the cache) |
 | `/` | filter — repo/module-row actions (`p`, `A`, `x`, `I`, `w`) then only target what the filter (and `!`) leaves visible |
-| `?` | help, `q` quit |
+| `?` | help, `q` quit (asks first while tasks run: they are interrupted and waited for) |
 
 ## How it works (and why)
 
@@ -118,21 +119,24 @@ same behind pins as `module-behind` rows. See [Dependencies](#dependencies).
   scheduler prefers applies over plans, and plans over enumerations — so a
   plan-all doesn't make you wait on background workspace discovery, and an
   apply you asked for jumps the queue.
-- **Plans are headless, applies are tmux.** Plans are read-only; applies are
-  interactive, long-running and must not die with the UI — so each apply runs
-  in a tmux window that outlives tfmux (a wrapper writes the exit code to a
-  file atomically). The apply still holds a pool slot and is watched to
-  completion; an apply left running when tfmux exits is re-adopted on restart.
-  Canceling (`x`) a *queued* apply drops it before launch; a *running* apply is
-  left attached in tmux.
-- **One key to "see what's happening" (`enter`).** Following a non-attachable
-  task and attaching to an attachable one are the same intent, so `enter`
-  unifies them: on a workspace with a live apply it attaches to that apply's
-  tmux window; otherwise it opens the plan log. Every pooled task (plan, and on
-  a module row a running init/enumerate) streams its output to a log file as it
-  runs, so `enter` tails it in real time (auto-scrolling unless you scroll up);
-  a finished task shows the captured log. Useful when an enumeration stalls on
-  a throttling backend and you want to see what it's doing.
+- **Every task is a child of tfmux and ends with it.** Applies run exactly
+  like plans: headless, `-input=false`, output streamed to a log file. Nothing
+  is detached, so nothing can be orphaned: quitting (or a hangup of the
+  terminal) interrupts every running terraform with SIGINT, which makes it
+  finish in-flight operations and release its state lock, and tfmux waits for
+  that before exiting. An apply that was interrupted is recorded as such and
+  the workspace needs a new plan — terraform refuses a plan file once state has
+  moved on. Persistence across your terminal going away is the job of tmux or
+  screen around tfmux, not of tfmux. Canceling (`x`) a *queued* apply drops it
+  before launch; a *running* apply is interrupted only from the task pane,
+  after confirming.
+- **One key to "see what's happening" (`enter`).** Every task (plan, apply,
+  output; and on a module row a running init/enumerate) streams its output to
+  a log file as it runs, so `enter` tails it in real time (auto-scrolling
+  unless you scroll up); a finished task shows the captured log. On a
+  workspace it picks the latest activity: a running apply, else a running
+  plan, else the last apply, else the last plan. Useful when an enumeration
+  stalls on a throttling backend and you want to see what it's doing.
 - **`TF_WORKSPACE`, never `workspace select`** — selecting would mutate
   `.terraform/environment` shared with your shell and other jobs. Modules with
   manifest command templates (see below) are the one exception: their
@@ -251,7 +255,7 @@ environment is instead a separate backend picked with `-backend-config`, a
   `${TFMUX_WORKSPACE##*-}` turns `myproject-prod` into `prod`.
 - tfmux **appends its own flags** after the snippet: `init` gets `-input=false
   -no-color` (plus `-upgrade` for `I`), `plan` gets `-input=false -no-color
-  -detailed-exitcode -out=<planfile>`, `apply` gets `-input=false
+  -detailed-exitcode -out=<planfile>`, `apply` gets `-input=false -no-color
   <planfile>`, `output` gets `-no-color`. Each template must therefore end
   with the terraform subcommand it names. A verb with no template runs
   `"$TFMUX_TF_BIN" <verb>` plus those flags. Don't put `-var` or `-var-file`
@@ -264,8 +268,7 @@ environment is instead a separate backend picked with `-backend-config`, a
 - If `init` references `$TFMUX_WORKSPACE`, the module directory can be
   initialised for only one workspace at a time. tfmux remembers which one
   (`init.workspace` in the module's state dir) and re-runs `init` before a
-  plan, output or apply for a different workspace — an apply does so inside
-  its tmux window, before `terraform apply`.
+  plan, output or apply for a different workspace.
 
 ## MCP server
 
@@ -282,7 +285,9 @@ everything; the agent gets tools.
   exposed, only terraform's text output (sensitive values stay redacted).
 - **`--all`** (or `tools = "all"` under `[mcp]` in the config) adds `apply`,
   `init_upgrade` and `discard_plan`. `apply` has the same gate as `A` in the
-  TUI and runs in the same tmux session.
+  TUI, waits for the apply, and returns terraform's output when it fails. A
+  client that disconnects mid-apply does not interrupt it; stopping the server
+  does, waiting for terraform to release its locks.
 - **Transport**: Streamable HTTP on `127.0.0.1:7411` (`listen` in config,
   `--listen` to override) behind a bearer token stored 0600 in the state dir.
   `--no-auth` is accepted on loopback only. `--stdio` serves a client on the

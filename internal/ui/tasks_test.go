@@ -5,7 +5,6 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -13,90 +12,11 @@ import (
 	"github.com/espoon-voltti/tfmux/internal/domain"
 	"github.com/espoon-voltti/tfmux/internal/runner"
 	"github.com/espoon-voltti/tfmux/internal/state"
-	"github.com/espoon-voltti/tfmux/internal/tmuxctl"
 )
 
-func runningApplyTask(m *Model, key, token string) {
+func runningApplyTask(m *Model, key string) {
 	m.tasks[runner.TaskID(runner.KindApply, key)] = &taskState{
-		kind: runner.KindApply, key: key, running: true, token: token,
-	}
-}
-
-// fakeTmux stands in for a real tmux server: windows exist only if
-// registered via addWindow, keyed by the same id/token scheme
-// tmuxctl.LaunchApply uses (WindowFor resolves by token, never by a raw id
-// alone) — so tests exercise attach/kill exactly as the real resolution path
-// does, rather than a mock that answers every call unconditionally.
-type fakeTmux struct {
-	windows map[string]string // window id -> token
-	killed  []string
-}
-
-func newFakeTmux() *fakeTmux { return &fakeTmux{windows: map[string]string{}} }
-
-func (f *fakeTmux) addWindow(id, token string) { f.windows[id] = token }
-
-func (f *fakeTmux) run(args ...string) ([]byte, error) {
-	if len(args) == 0 {
-		return nil, nil
-	}
-	switch args[0] {
-	case "has-session":
-		return nil, nil
-	case "list-windows":
-		var b strings.Builder
-		for id, token := range f.windows {
-			fmt.Fprintf(&b, "%s %s\n", id, token)
-		}
-		return []byte(b.String()), nil
-	case "select-window":
-		id := args[len(args)-1]
-		if _, ok := f.windows[id]; !ok {
-			return nil, fmt.Errorf("no such window: %s", id)
-		}
-		return nil, nil
-	case "kill-window":
-		id := args[len(args)-1]
-		f.killed = append(f.killed, id)
-		delete(f.windows, id)
-		return nil, nil
-	}
-	return nil, nil
-}
-
-func TestTaskPaneListsTasks(t *testing.T) {
-	m, mod := fixtureModel(t)
-	enumerated(t, m, mod, "prod")
-	m.addTask(runner.KindPlan, mod.Path+"//prod")
-
-	keyPress(m, "T")
-	if m.focus != focusTasks {
-		t.Fatal("T should open the task pane")
-	}
-	v := m.View()
-	if !strings.Contains(v, "Tasks (1)") {
-		t.Errorf("pane header missing: %q", v)
-	}
-	if !strings.Contains(v, "queued") || !strings.Contains(v, "prod") {
-		t.Errorf("queued task not listed: %q", v)
-	}
-
-	keyPress(m, "T") // toggle closed
-	if m.focus != focusTree {
-		t.Error("T should close the pane")
-	}
-}
-
-func TestCancelSelectedQueuedPlan(t *testing.T) {
-	m, mod := fixtureModel(t)
-	enumerated(t, m, mod, "prod")
-	key := mod.Path + "//prod"
-	m.addTask(runner.KindPlan, key)
-
-	keyPress(m, "T")
-	keyPress(m, "x")
-	if m.hasTask(runner.KindPlan, key) {
-		t.Error("x should cancel the selected queued plan")
+		kind: runner.KindApply, key: key, running: true,
 	}
 }
 
@@ -105,7 +25,7 @@ func TestCancelAllQueuedKeepsRunningApply(t *testing.T) {
 	enumerated(t, m, mod, "a", "b")
 	m.addTask(runner.KindPlan, mod.Path+"//a")
 	m.addTask(runner.KindPlan, mod.Path+"//b")
-	runningApplyTask(m, mod.Path+"//a", "tok-a")
+	runningApplyTask(m, mod.Path+"//a")
 
 	m.cancelQueuedTasks()
 
@@ -117,115 +37,95 @@ func TestCancelAllQueuedKeepsRunningApply(t *testing.T) {
 	}
 }
 
-func TestKillRunningApplyNeedsConfirm(t *testing.T) {
+func TestInterruptRunningApplyNeedsConfirm(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")
 	key := mod.Path + "//prod"
-
-	ft := newFakeTmux()
-	ft.addWindow("@1", "tok-1")
-	m.tmux = tmuxctl.NewWithRunner("sess", ft.run)
-	runningApplyTask(m, key, "tok-1")
+	runningApplyTask(m, key)
 
 	keyPress(m, "T")
 	keyPress(m, "x") // selects the running apply
 	if m.confirmKill == "" {
-		t.Fatal("killing a running apply should ask for confirmation")
+		t.Fatal("interrupting a running apply should ask for confirmation")
 	}
-	if len(ft.killed) != 0 {
-		t.Error("must not kill before confirmation")
+	if !strings.Contains(m.View(), "interrupt running apply?") {
+		t.Error("confirmation prompt not shown")
 	}
 
 	keyPress(m, "y") // confirm
 	if m.confirmKill != "" {
 		t.Error("confirmation should clear after y")
 	}
-	if len(ft.killed) != 1 || ft.killed[0] != "@1" {
-		t.Errorf("kill-window not invoked on the window: %v", ft.killed)
+	if !strings.Contains(m.status, "interrupting apply") {
+		t.Errorf("status = %q", m.status)
+	}
+	if !m.hasTask(runner.KindApply, key) {
+		t.Error("the apply must stay listed until the runner reports it stopped")
 	}
 }
 
-// liveApplyWindow attaches for a running or failed apply, but not a clean or
-// aborted one.
-func TestLiveApplyWindow(t *testing.T) {
+// x on a tree row cancels plans but never a running apply: that takes the
+// task pane's confirmation.
+func TestTreeCancelLeavesRunningApplyAlone(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	runningApplyTask(m, key)
+	planTask(m, key, false)
+	m.cursor = 2 // workspace row
+
+	keyPress(m, "x")
+	if !m.hasTask(runner.KindApply, key) {
+		t.Error("running apply canceled from the tree")
+	}
+	if m.hasTask(runner.KindPlan, key) {
+		t.Error("queued plan not canceled")
+	}
+	if !strings.Contains(m.status, "left alone") {
+		t.Errorf("status = %q", m.status)
+	}
+}
+
+// viewKind follows the latest activity: an apply in flight, else a plan in
+// flight, else the recorded apply, else the plan.
+func TestViewKindPicksLatestActivity(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")
 	key := mod.Path + "//prod"
 
-	if _, ok := m.liveApplyWindow(key); ok {
-		t.Error("no apply → no window")
+	if k := m.viewKind(key); k != runner.KindPlan {
+		t.Errorf("nothing yet → %v, want plan", k)
 	}
-
-	runningApplyTask(m, key, "tok-1")
-	if w, ok := m.liveApplyWindow(key); !ok || w != "tok-1" {
-		t.Errorf("running apply: got %q %v", w, ok)
+	runningApplyTask(m, key)
+	if k := m.viewKind(key); k != runner.KindApply {
+		t.Errorf("running apply → %v, want apply", k)
 	}
 	delete(m.tasks, runner.TaskID(runner.KindApply, key))
 
-	zero := 0
-	m.runs[key] = &state.RunRecord{
-		ModulePath: mod.Path, Workspace: "prod",
-		Apply: &state.ApplyRecord{WindowID: "@2", Token: "tok-2", ExitCode: &zero},
-	}
-	if _, ok := m.liveApplyWindow(key); ok {
-		t.Error("clean apply → no live window")
-	}
-
 	one := 1
-	m.runs[key].Apply.ExitCode = &one
-	if w, ok := m.liveApplyWindow(key); !ok || w != "tok-2" {
-		t.Errorf("failed apply: got %q %v", w, ok)
+	m.runs[key] = &state.RunRecord{ModulePath: mod.Path, Workspace: "prod", Apply: &state.ApplyRecord{ExitCode: &one}}
+	if k := m.viewKind(key); k != runner.KindApply {
+		t.Errorf("recorded apply → %v, want apply", k)
 	}
-
-	m.runs[key].Apply.Aborted = true
-	if _, ok := m.liveApplyWindow(key); ok {
-		t.Error("aborted apply → no live window")
-	}
-}
-
-// enter on a workspace with a running apply attaches (tmux) rather than
-// opening the plan log.
-func TestEnterAttachesToRunningApply(t *testing.T) {
-	m, mod := fixtureModel(t)
-	enumerated(t, m, mod, "prod")
-	key := mod.Path + "//prod"
-	m.tmuxOK = true
-	ft := newFakeTmux()
-	ft.addWindow("@1", "tok-1")
-	m.tmux = tmuxctl.NewWithRunner("sess", ft.run)
-	runningApplyTask(m, key, "tok-1")
-	m.cursor = 2 // workspace row
-
-	cmd := keyPress(m, "enter")
-	if cmd == nil {
-		t.Fatal("enter on a running apply should produce an attach command")
-	}
-	if m.detailFollow != "" {
-		t.Error("attaching must not start log follow")
-	}
-	if m.focus == focusDetail {
-		t.Error("attaching must not open the log viewer")
+	planTask(m, key, true)
+	if k := m.viewKind(key); k != runner.KindPlan {
+		t.Errorf("plan in flight → %v, want plan", k)
 	}
 }
 
-// Pressing enter on an apply whose token no longer resolves to any window
-// (the tmux server restarted, or the window was closed) must say so. Attaching
-// anyway is what used to drop the user into an unrelated leftover window and
-// present its days-old output as this apply's.
-func TestEnterOnGoneApplyWindowSaysSo(t *testing.T) {
+// enter on a workspace with a running apply follows the apply log.
+func TestEnterFollowsRunningApplyLog(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")
 	key := mod.Path + "//prod"
-	m.tmuxOK = true
-	m.tmux = tmuxctl.NewWithRunner("sess", newFakeTmux().run) // no windows at all
-	runningApplyTask(m, key, "tok-gone")
+	runningApplyTask(m, key)
 	m.cursor = 2 // workspace row
 
-	if cmd := keyPress(m, "enter"); cmd != nil {
-		t.Error("must not attach when the token resolves to no window")
+	if cmd := keyPress(m, "enter"); cmd == nil {
+		t.Fatal("enter on a running apply should load its log")
 	}
-	if !strings.Contains(m.status, "gone") {
-		t.Errorf("status doesn't say the window is gone: %q", m.status)
+	if m.detailFollow != runner.TaskID(runner.KindApply, key) {
+		t.Errorf("detailFollow = %q, want the apply task", m.detailFollow)
 	}
 }
 
@@ -306,8 +206,8 @@ func keysOf(tasks []*taskState) []string {
 func TestTaskPaneSortsRunningFirst(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "a", "b")
-	m.addTask(runner.KindEnumerate, mod.Path)    // queued, low priority
-	runningApplyTask(m, mod.Path+"//a", "tok-a") // running, high priority
+	m.addTask(runner.KindEnumerate, mod.Path) // queued, low priority
+	runningApplyTask(m, mod.Path+"//a")       // running, high priority
 
 	tasks := m.sortedTasks()
 	if len(tasks) != 2 || tasks[0].kind != runner.KindApply || !tasks[0].running {

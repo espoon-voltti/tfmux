@@ -30,9 +30,12 @@ type Config struct {
 	Roots        []string              `toml:"roots"`
 	Parallelism  int                   `toml:"parallelism"`
 	TerraformBin string                `toml:"terraform_bin"`
-	TmuxSession  string                `toml:"tmux_session"`
 	PlanTTL      duration              `toml:"plan_ttl"`
 	Repos        map[string]RepoConfig `toml:"repos"`
+
+	// TmuxSession is accepted so a config file that sets it still loads
+	// (unknown keys are rejected); nothing reads it.
+	TmuxSession string `toml:"tmux_session"`
 
 	// InitParallelism caps concurrent `terraform init` invocations across all
 	// modules. 0 (the default) auto-detects: capped to 1 when a Terraform or
@@ -95,7 +98,6 @@ func Default() *Config {
 	return &Config{
 		Parallelism:  4,
 		TerraformBin: "terraform",
-		TmuxSession:  "tfmux",
 		PlanTTL:      duration(24 * time.Hour),
 		MCP:          MCPConfig{Listen: "127.0.0.1:7411", Tools: MCPToolsReadOnly},
 	}

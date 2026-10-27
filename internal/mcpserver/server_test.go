@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -304,9 +303,6 @@ func TestEnumerateAndRefresh(t *testing.T) {
 }
 
 func TestApplyRefusedWithoutReadyPlan(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available")
-	}
 	e := newEstate(t)
 	cs := connect(t, e, true)
 	text, _, res := call(t, cs, "apply", map[string]any{"module": "demo-infra/terraform/service", "workspace": "prod"})

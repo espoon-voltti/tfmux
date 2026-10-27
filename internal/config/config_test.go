@@ -48,7 +48,7 @@ terraform_bin = "terraform-0.13"
 	if cfg.Roots[1] != "/abs/other" {
 		t.Errorf("root[1] = %q", cfg.Roots[1])
 	}
-	if cfg.Parallelism != 8 || cfg.TerraformBin != "tofu" || cfg.TmuxSession != "infra" {
+	if cfg.Parallelism != 8 || cfg.TerraformBin != "tofu" {
 		t.Errorf("unexpected scalars: %+v", cfg)
 	}
 	if cfg.PlanTTLDuration() != 2*time.Hour+30*time.Minute {

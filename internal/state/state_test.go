@@ -24,7 +24,7 @@ func TestRunRecordRoundTrip(t *testing.T) {
 		Summary:      ChangeSummary{Add: 2, Change: 1},
 		Fingerprint:  "abc123|def456",
 		TFBinVersion: "1.9.0",
-		Apply:        &ApplyRecord{Started: now, ExitCode: &ec, WindowID: "@3"},
+		Apply:        &ApplyRecord{Started: now, ExitCode: &ec},
 	}
 	if err := s.SaveRun(rec); err != nil {
 		t.Fatal(err)

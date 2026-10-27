@@ -39,10 +39,9 @@
 //     picks its workspace when it runs, from the earliest task waiting on it,
 //     so a plan can never be told "already initialised" for the wrong one.
 //
-// Applies run in a tmux window (they're interactive, long-running, and must
-// outlive tfmux) but still occupy a pool slot: the task launches the window,
-// reports its id, then polls the exit file until it completes. On restart an
-// in-flight apply is re-adopted as a poll-only task.
+// Every task is a child process of this one and ends with it: Shutdown
+// interrupts whatever is running and waits for terraform to stop, so a quit
+// never leaves a state lock held. Nothing survives tfmux exiting.
 package runner
 
 import (
@@ -50,8 +49,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
-	"strings"
 	"sync"
 	"time"
 
@@ -59,7 +56,6 @@ import (
 	"github.com/espoon-voltti/tfmux/internal/gitstatus"
 	"github.com/espoon-voltti/tfmux/internal/state"
 	"github.com/espoon-voltti/tfmux/internal/tfexec"
-	"github.com/espoon-voltti/tfmux/internal/tmuxctl"
 )
 
 // Kind classifies a task.
@@ -69,7 +65,7 @@ const (
 	KindEnumerate Kind = iota // list a module's workspaces
 	KindInit                  // terraform init -upgrade
 	KindPlan                  // plan one workspace
-	KindApply                 // apply one workspace (runs in tmux)
+	KindApply                 // apply one workspace's saved plan
 	KindOutput                // terraform output for one workspace
 )
 
@@ -102,10 +98,6 @@ func (k Kind) Priority() int {
 	}
 	return 0
 }
-
-// Attachable reports whether a running task of this kind has a tmux window the
-// user can attach to.
-func (k Kind) Attachable() bool { return k == KindApply }
 
 // Phase is a task's position in its lifecycle.
 type Phase int
@@ -147,11 +139,7 @@ type Event struct {
 	Phase      Phase
 
 	Workspaces []string         // KindEnumerate, PhaseDone
-	Record     *state.RunRecord // KindPlan, terminal
-	WindowID   string           // KindApply, PhaseRunning (once the window is up)
-	Token      string           // KindApply, PhaseRunning: the window's durable identity — see tmuxctl.WindowFor
-	ApplyExit  *int             // KindApply, PhaseDone (exit code; nil when aborted)
-	Aborted    bool             // KindApply, PhaseDone (window vanished, outcome unknown)
+	Record     *state.RunRecord // KindPlan and KindApply, terminal: the saved record (nil when terraform never ran)
 	Err        string           // PhaseFailed; for PhaseCanceled, the failed init that dropped the task, when that is why
 
 	// CanceledDependents counts the module's queued tasks dropped because they
@@ -181,10 +169,10 @@ func TaskID(kind Kind, key string) string { return kind.String() + ":" + key }
 // TaskID returns the event's task identity.
 func (e Event) TaskID() string { return TaskID(e.Kind, e.Key) }
 
-// jobFunc runs a task body. It may report intermediate state (e.g. an apply's
-// window id) through emit. The returned Event carries the terminal payload; the
-// scheduler stamps its Phase (Done, Failed when Err is set, or Canceled when
-// the context was canceled).
+// jobFunc runs a task body. It may report intermediate state through emit.
+// The returned Event carries the terminal payload; the scheduler stamps its
+// Phase (Done, Failed when Err is set, or Canceled when the context was
+// canceled, keeping only Record).
 type jobFunc func(ctx context.Context, emit func(Event)) Event
 
 type task struct {
@@ -197,6 +185,7 @@ type task struct {
 	cancel     context.CancelFunc
 	job        jobFunc
 	started    bool
+	deferred   bool // went back to the queue to wait for an init (see deferLocked)
 }
 
 func (t *task) id() string { return TaskID(t.kind, t.key) }
@@ -207,7 +196,6 @@ type Runner struct {
 	Events chan Event
 
 	store *state.Store
-	tmux  *tmuxctl.Ctl
 
 	mu          sync.Mutex
 	cond        *sync.Cond
@@ -228,14 +216,13 @@ type Runner struct {
 }
 
 // initParallelism caps concurrent KindInit tasks; 0 means unlimited.
-func New(parallelism, initParallelism int, store *state.Store, tmux *tmuxctl.Ctl) *Runner {
+func New(parallelism, initParallelism int, store *state.Store) *Runner {
 	if parallelism < 1 {
 		parallelism = 1
 	}
 	r := &Runner{
 		Events:      make(chan Event, 64),
 		store:       store,
-		tmux:        tmux,
 		parallelism: parallelism,
 		initLimit:   initParallelism,
 		busyModule:  map[string]bool{},
@@ -288,9 +275,10 @@ func (r *Runner) pickLocked() *task {
 			if r.initLimit > 0 && r.activeInits >= r.initLimit {
 				continue
 			}
-		} else if t.kind != KindApply && r.initQueuedLocked(t.modulePath) {
-			// An apply is exempt: it preempts, and its plan file was made
-			// against the module's current lock file, not the upgraded one.
+		} else if (t.kind != KindApply || t.deferred) && r.initQueuedLocked(t.modulePath) {
+			// An apply is exempt unless it asked for that init itself: it
+			// preempts, and its plan file was made against the module's
+			// current lock file, not the upgraded one.
 			continue
 		}
 		if best < 0 {
@@ -365,17 +353,18 @@ func (r *Runner) execute(t *task) {
 func (r *Runner) deferLocked(t *task, d *deferral) {
 	t.job = d.retry
 	t.started = false
+	t.deferred = true
 	r.ready = append(r.ready, t)
 	r.enqueueLocked(KindInit, d.module.Path, d.module.Path, "", r.initJob(d.module, false, d.wantWS))
 }
 
 // dropInitDependentsLocked removes the queued tasks that initQueuedLocked was
-// holding back in the module: everything but applies.
+// holding back in the module: everything but applies that never deferred.
 func (r *Runner) dropInitDependentsLocked(modulePath string) []*task {
 	var dropped []*task
 	kept := r.ready[:0]
 	for _, q := range r.ready {
-		if q.modulePath == modulePath && q.kind != KindApply {
+		if q.modulePath == modulePath && (q.kind != KindApply || q.deferred) {
 			delete(r.inflight, q.id())
 			q.cancel()
 			dropped = append(dropped, q)
@@ -412,7 +401,7 @@ func (r *Runner) runJob(t *task) Event {
 	})
 	switch {
 	case t.ctx.Err() != nil:
-		return Event{Phase: PhaseCanceled}
+		return Event{Phase: PhaseCanceled, Record: out.Record}
 	case out.deferral != nil:
 		return out // not terminal — execute() requeues instead of emitting
 	case out.Err != "":
@@ -461,10 +450,8 @@ func (r *Runner) enqueueLocked(kind Kind, key, modulePath, wantWS string, job jo
 }
 
 // Cancel stops the task of one kind with the given key. A queued task is
-// dropped before it runs (emitting Canceled); a running non-apply task
-// receives SIGINT. A running apply is left alone — its terraform lives in
-// tmux, so canceling our poll wouldn't stop it (killing it is a separate,
-// explicit action).
+// dropped before it runs (emitting Canceled); a running task's terraform
+// receives SIGINT and the task ends Canceled once it has stopped.
 func (r *Runner) Cancel(kind Kind, key string) {
 	r.cancel(func(t *task) bool { return t.kind == kind && t.key == key })
 }
@@ -483,9 +470,7 @@ func (r *Runner) cancel(match func(*task) bool) {
 			continue
 		}
 		if t.started {
-			if t.kind != KindApply {
-				t.cancel()
-			}
+			t.cancel()
 			continue
 		}
 		r.removeReadyLocked(t)
@@ -517,6 +502,43 @@ func (r *Runner) Running(key string) bool {
 		}
 	}
 	return false
+}
+
+// Shutdown drops every queued task, interrupts every running one and waits
+// up to timeout for them to stop. It returns how many were still running
+// when it gave up. No events are emitted for the dropped queue: the caller
+// is exiting.
+func (r *Runner) Shutdown(timeout time.Duration) int {
+	r.mu.Lock()
+	for id, t := range r.inflight {
+		if t.started {
+			t.cancel()
+			continue
+		}
+		r.removeReadyLocked(t)
+		delete(r.inflight, id)
+	}
+	r.mu.Unlock()
+	deadline := time.Now().Add(timeout)
+	for {
+		r.mu.Lock()
+		n := r.active
+		r.mu.Unlock()
+		if n == 0 || time.Now().After(deadline) {
+			return n
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// ModuleBusy reports whether some tfmux process currently runs a task in the
+// module: its cross-process lock is held. A false answer is a snapshot.
+func (r *Runner) ModuleBusy(modulePath string) bool {
+	path, err := r.store.ModuleLockPath(modulePath)
+	if err != nil {
+		return false
+	}
+	return flockHeld(path)
 }
 
 // --- event pump ---
@@ -777,129 +799,101 @@ func (r *Runner) outputJob(w *domain.Workspace, afterInit bool) jobFunc {
 	}
 }
 
-// EnqueueApply launches an apply for one workspace in tmux and watches it to
-// completion, holding a pool slot the whole time. plannedVersion guards against
-// applying a plan made with a different terraform binary. Returns false if
-// already in flight.
-//
-// The module lock is held (by runJob) for as long as we watch the apply, so a
-// concurrent instance can't touch the module mid-apply. The one gap: the
-// apply's terraform runs in tmux and outlives tfmux, so quitting tfmux during
-// an apply drops the lock early. A restart re-adopts the apply (EnqueueApplyPoll)
-// and re-takes the lock; Terraform's own backend state lock covers the gap.
+// EnqueueApply applies one workspace's saved plan, persisting its outcome in
+// the workspace's RunRecord and its output in the apply log. plannedVersion
+// guards against applying a plan made with a different terraform binary.
+// Returns false if already in flight.
 func (r *Runner) EnqueueApply(w *domain.Workspace, plannedVersion string) bool {
+	return r.enqueue(KindApply, w.Key(), w.Module.Path, w.Name, r.applyJob(w, plannedVersion, false))
+}
+
+func (r *Runner) applyJob(w *domain.Workspace, plannedVersion string, afterInit bool) jobFunc {
 	m := w.Module
-	return r.enqueue(KindApply, w.Key(), m.Path, w.Name, func(ctx context.Context, emit func(Event)) Event {
+	return func(ctx context.Context, _ func(Event)) Event {
+		tf := tfFor(m)
+		if !tf.Initialized() {
+			if afterInit {
+				return Event{Err: "apply: module not initialized (a preceding terraform init failed)"}
+			}
+			return r.deferForInit(m, w.Name, r.applyJob(w, plannedVersion, true))
+		}
+		if r.initMismatch(m, w.Name) {
+			return r.deferForInit(m, w.Name, r.applyJob(w, plannedVersion, afterInit))
+		}
 		if plannedVersion != "" {
-			if cur, err := tfFor(m).Version(ctx); err == nil && cur != plannedVersion {
+			if cur, err := tf.Version(ctx); err == nil && cur != plannedVersion {
 				return Event{Err: fmt.Sprintf(
 					"refusing to apply: plan made with %s %s, current is %s — re-plan",
 					m.TFBin, plannedVersion, cur)}
 			}
 		}
-		planFile, err := r.store.PlanFilePath(m.Path, w.Name)
+		rec, err := r.apply(ctx, tf, m, w.Name)
+		ev := Event{Record: rec}
 		if err != nil {
-			return Event{Err: err.Error()}
+			ev.Err = err.Error()
 		}
-		exitFile, err := r.store.ApplyExitPath(m.Path, w.Name)
-		if err != nil {
-			return Event{Err: err.Error()}
-		}
-		// A repo-root module's RelPath is ".", which path.Join drops.
-		windowName := path.Join(m.Repo.Name, m.RelPath, w.Name)
-		spec := tmuxctl.ApplySpec{
-			ModuleDir: m.Path,
-			Workspace: w.Name,
-			TFBin:     m.TFBin,
-			PlanFile:  planFile,
-			ExitFile:  exitFile,
-			Name:      windowName,
-		}
-		if m.Templated() {
-			spec.ApplyCommand = tfexec.ApplyCommand(tfexec.TemplateOr(m.Templates.Apply, "apply"), planFile)
-			// The module lock is held here, so the marker read is current;
-			// the wrapper script re-inits before applying when it differs.
-			if r.initMismatch(m, w.Name) {
-				spec.InitCommand = tfexec.InitCommand(tfexec.TemplateOr(m.Templates.Init, "init"), false)
-				spec.InitMarkerFile, err = r.store.InitWorkspacePath(m.Path)
-				if err != nil {
-					return Event{Err: err.Error()}
-				}
-				if err := r.store.ClearInitWorkspace(m.Path); err != nil {
-					return Event{Err: "clear init workspace: " + err.Error()}
-				}
-			}
-		}
-		windowID, token, err := r.tmux.LaunchApply(spec)
-		if err != nil {
-			return Event{Err: err.Error()}
-		}
-		emit(Event{Phase: PhaseRunning, WindowID: windowID, Token: token})
-		return r.pollApply(ctx, exitFile, token)
-	})
-}
-
-// EnqueueApplyPoll re-adopts an apply that was already running in tmux when
-// tfmux last exited: it polls the existing window/exit file without
-// relaunching. token is the durable identity stamped on the window at launch
-// (see tmuxctl.LaunchApply); the window ID persisted alongside it is not
-// enough to re-find the apply, since window IDs get recycled by a fresh tmux
-// server and a stale one can resolve to an unrelated window.
-//
-// Anything short of "a window still carries this token" means the apply is
-// over rather than still running — including having no tmux to ask, which
-// leaves the outcome unknown just as a vanished window does.
-func (r *Runner) EnqueueApplyPoll(modulePath, workspace, token string) bool {
-	return r.enqueue(KindApply, modulePath+"//"+workspace, modulePath, workspace, func(ctx context.Context, emit func(Event)) Event {
-		exitFile, err := r.store.ApplyExitPath(modulePath, workspace)
-		if err != nil {
-			return Event{Err: err.Error()}
-		}
-		if r.tmux == nil {
-			return Event{Aborted: true}
-		}
-		windowID, ok := r.tmux.WindowFor(token)
-		if !ok {
-			return Event{Aborted: true}
-		}
-		emit(Event{Phase: PhaseRunning, WindowID: windowID, Token: token})
-		return r.pollApply(ctx, exitFile, token)
-	})
-}
-
-// pollApply watches the apply: it returns once the exit file appears (the
-// wrapper finished) or the window vanishes (aborted). Canceling the context
-// stops the poll only — the tmux window keeps running.
-//
-// Liveness is checked by token, not by window ID: an ID that still exists in
-// the session could belong to an entirely different window if the tmux
-// server restarted and recycled it, so only "a window still carries this
-// apply's token" counts as still running.
-func (r *Runner) pollApply(ctx context.Context, exitFile, token string) Event {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		if data, err := os.ReadFile(exitFile); err == nil {
-			code := parseExit(data)
-			return Event{ApplyExit: &code}
-		}
-		if r.tmux != nil {
-			if _, ok := r.tmux.WindowFor(token); !ok {
-				return Event{Aborted: true}
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return Event{}
-		case <-ticker.C:
-		}
+		return ev
 	}
 }
 
-func parseExit(b []byte) int {
-	var code int
-	fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &code)
-	return code
+// apply runs terraform apply on the saved plan. The run record is saved with
+// the apply started before terraform runs, so a tfmux that dies mid-apply
+// leaves evidence of it, and saved again with the outcome. A canceled apply
+// is recorded as aborted: terraform stopped gracefully, but the plan may be
+// partially applied. The record is re-read before the final save so a change
+// made to it meanwhile (a downstream invalidation) survives.
+func (r *Runner) apply(ctx context.Context, tf tfexec.TF, m *domain.Module, workspace string) (*state.RunRecord, error) {
+	planFile, err := r.store.PlanFilePath(m.Path, workspace)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := r.store.LoadRun(m.Path, workspace)
+	if err != nil {
+		return nil, err
+	}
+	if rec == nil {
+		return nil, fmt.Errorf("apply: no plan record for %s", workspace)
+	}
+	a := &state.ApplyRecord{Started: time.Now()}
+	rec.Apply = a
+	if err := r.store.SaveRun(rec); err != nil {
+		return nil, err
+	}
+
+	logPath, logErr := r.store.ApplyLogPath(m.Path, workspace)
+	if logErr == nil {
+		if logFile, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); ferr == nil {
+			tf.Out = logFile
+			defer logFile.Close()
+		}
+	}
+	res, runErr := tf.Apply(ctx, workspace, planFile)
+	now := time.Now()
+	a.Finished = &now
+	if tf.Out == nil && logErr == nil {
+		_ = os.WriteFile(logPath, res.Output, 0o600) // fallback if streaming setup failed
+	}
+
+	if fresh, err := r.store.LoadRun(m.Path, workspace); err == nil && fresh != nil {
+		rec = fresh
+	}
+	switch {
+	case runErr != nil && ctx.Err() != nil:
+		a.Aborted = true
+		rec.Apply = a
+	case runErr != nil:
+		rec.Apply = nil // terraform never ran
+	default:
+		a.ExitCode = &res.ExitCode
+		rec.Apply = a
+		if res.ExitCode == 0 {
+			_ = r.store.DiscardPlan(m.Path, workspace)
+		}
+	}
+	if err := r.store.SaveRun(rec); err != nil && runErr == nil {
+		return rec, err
+	}
+	return rec, runErr
 }
 
 // plan runs terraform plan for one workspace. The returned needsInit reports

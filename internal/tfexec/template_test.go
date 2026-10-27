@@ -21,7 +21,7 @@ func TestTemplateCommandStrings(t *testing.T) {
 		{InitCommand("terraform init", false), "terraform init -input=false -no-color"},
 		{InitCommand("terraform init", true), "terraform init -input=false -no-color -upgrade"},
 		{PlanCommand("terraform plan", odd), "terraform plan -input=false -no-color -detailed-exitcode -out=" + quoted},
-		{ApplyCommand("terraform apply", odd), "terraform apply -input=false " + quoted},
+		{ApplyCommand("terraform apply", odd), "terraform apply -input=false -no-color " + quoted},
 		{OutputCommand("terraform output"), "terraform output -no-color"},
 		{TemplateOr("", "plan"), `"$TFMUX_TF_BIN" plan`},
 		{TemplateOr("custom plan", "plan"), "custom plan"},

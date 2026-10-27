@@ -16,9 +16,6 @@ parallelism = 4
 # so per-directory .terraform-version files resolve). Set "tofu" for OpenTofu.
 terraform_bin = "terraform"
 
-# Name of the tmux session applies run in (`tmux attach -t <this>`).
-tmux_session = "tfmux"
-
 # Saved plan files older than this are deleted (they contain secrets).
 plan_ttl = "24h"
 

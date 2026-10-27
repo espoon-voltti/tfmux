@@ -22,6 +22,7 @@ import (
 //	                      normally (exit code defaults to 1 when set);
 //	                      simulates specific failures like a state lock
 //	TFMUX_FAKE_OUTPUT_EXIT exit code for `output` (default 0)
+//	TFMUX_FAKE_APPLY_EXIT exit code for `apply` (default 0)
 //	TFMUX_FAKE_INIT_STDERR text `init` writes to stderr before failing with
 //	                      exit 1, leaving the module as it was
 //	TFMUX_FAKE_NEED_INIT  if set, plan/workspace-list fail with an
@@ -87,7 +88,7 @@ case "$1" in
     ;;
   apply)
     echo "Apply complete!"
-    finish 0
+    finish "${TFMUX_FAKE_APPLY_EXIT:-0}"
     ;;
 esac
 echo "unknown subcommand $1" >&2

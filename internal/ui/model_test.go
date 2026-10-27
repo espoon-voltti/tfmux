@@ -292,7 +292,7 @@ func TestFooterHelpIsContextSensitive(t *testing.T) {
 	planTask(m, key, true) // give the task pane something to show
 	m.focus = focusTasks
 	view = m.View()
-	if !strings.Contains(view, "cancel/kill task") || !strings.Contains(view, "cancel all queued") {
+	if !strings.Contains(view, "cancel/interrupt task") || !strings.Contains(view, "cancel all queued") {
 		t.Error("task pane footer missing cancel hints")
 	}
 	if strings.Contains(view, "toggle ignore") {
@@ -341,12 +341,6 @@ func TestApplyGuards(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")
 	m.cursor = 2
-	m.tmuxOK = false
-	keyPress(m, "A")
-	if !strings.Contains(m.status, "tmux not found") {
-		t.Errorf("status = %q", m.status)
-	}
-	m.tmuxOK = true
 	keyPress(m, "A")
 	if !strings.Contains(m.status, "nothing to apply") {
 		t.Errorf("status = %q", m.status)
@@ -436,17 +430,12 @@ func TestApplyDoneSuccessDiscardsPlan(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")
 	key := mod.Path + "//prod"
-	m.runs[key] = &state.RunRecord{
-		ModulePath: mod.Path, Workspace: "prod",
-		PlanExitCode: tfexec.PlanChanges,
-		Apply:        &state.ApplyRecord{Started: time.Now(), WindowID: "@1"},
-	}
+	m.runs[key] = &state.RunRecord{ModulePath: mod.Path, Workspace: "prod", PlanExitCode: tfexec.PlanChanges}
 	m.planFiles[key] = true
 	m.tasks[runner.TaskID(runner.KindApply, key)] = &taskState{kind: runner.KindApply, running: true}
-	zero := 0
 	m.updateRunnerEvent(runner.Event{
 		Kind: runner.KindApply, Key: key, ModulePath: mod.Path,
-		Phase: runner.PhaseDone, ApplyExit: &zero,
+		Phase: runner.PhaseDone, Record: appliedRecord(mod, "prod", 0),
 	})
 	rec := m.runs[key]
 	if rec.Apply.ExitCode == nil || *rec.Apply.ExitCode != 0 || rec.Apply.Finished == nil {
@@ -460,22 +449,58 @@ func TestApplyDoneSuccessDiscardsPlan(t *testing.T) {
 	}
 }
 
-func TestApplyDoneVanishedWindow(t *testing.T) {
+// appliedRecord is the record the runner reports for a finished apply.
+func appliedRecord(mod *domain.Module, ws string, exit int) *state.RunRecord {
+	now := time.Now()
+	return &state.RunRecord{
+		ModulePath: mod.Path, Workspace: ws, PlanExitCode: tfexec.PlanChanges,
+		Apply: &state.ApplyRecord{Started: now, Finished: &now, ExitCode: &exit},
+	}
+}
+
+func TestApplyDoneInterrupted(t *testing.T) {
 	m, mod := fixtureModel(t)
 	enumerated(t, m, mod, "prod")
 	key := mod.Path + "//prod"
-	m.runs[key] = &state.RunRecord{
-		ModulePath: mod.Path, Workspace: "prod",
-		PlanExitCode: tfexec.PlanChanges,
-		Apply:        &state.ApplyRecord{Started: time.Now(), WindowID: "@1"},
-	}
+	m.runs[key] = &state.RunRecord{ModulePath: mod.Path, Workspace: "prod", PlanExitCode: tfexec.PlanChanges}
 	m.tasks[runner.TaskID(runner.KindApply, key)] = &taskState{kind: runner.KindApply, running: true}
+	now := time.Now()
 	m.updateRunnerEvent(runner.Event{
 		Kind: runner.KindApply, Key: key, ModulePath: mod.Path,
-		Phase: runner.PhaseDone, Aborted: true,
+		Phase: runner.PhaseCanceled,
+		Record: &state.RunRecord{ModulePath: mod.Path, Workspace: "prod", PlanExitCode: tfexec.PlanChanges,
+			Apply: &state.ApplyRecord{Started: now, Finished: &now, Aborted: true}},
 	})
 	if !m.runs[key].Apply.Aborted {
-		t.Error("vanished window should mark apply aborted")
+		t.Error("interrupted apply should be recorded as aborted")
+	}
+	if !strings.Contains(m.status, "interrupted") {
+		t.Errorf("status = %q", m.status)
+	}
+	if m.hasTask(runner.KindApply, key) {
+		t.Error("apply task not cleared")
+	}
+}
+
+// Quitting with a running task asks first; with only queued tasks it does
+// not.
+func TestQuitAsksWhileTasksRun(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod")
+	key := mod.Path + "//prod"
+	planTask(m, key, false)
+	if cmd := keyPress(m, "q"); cmd == nil || m.confirmQuit {
+		t.Error("queued tasks alone must not block quitting")
+	}
+	planTask(m, key, true)
+	if cmd := keyPress(m, "q"); cmd != nil || !m.confirmQuit {
+		t.Error("a running task must ask before quitting")
+	}
+	if !strings.Contains(m.View(), "1 task(s) still running") {
+		t.Error("prompt not shown")
+	}
+	if cmd := keyPress(m, "y"); cmd == nil {
+		t.Error("y should quit")
 	}
 }
 
@@ -754,9 +779,10 @@ func stateFixture(t *testing.T, m *Model, base *domain.Module) (service *domain.
 // applied finishes an apply of ws whose plan changed outputs.
 func applied(m *Model, mod *domain.Module, ws string) {
 	key := mod.Path + "//" + ws
-	m.runs[key] = &state.RunRecord{ModulePath: mod.Path, Workspace: ws, PlanExitCode: tfexec.PlanChanges, OutputsChanged: true, Apply: &state.ApplyRecord{Started: time.Now()}}
-	exit := 0
-	m.updateRunnerEvent(runner.Event{Kind: runner.KindApply, Key: key, ModulePath: mod.Path, Phase: runner.PhaseDone, ApplyExit: &exit})
+	rec := appliedRecord(mod, ws, 0)
+	rec.OutputsChanged = true
+	m.runs[key] = rec
+	m.updateRunnerEvent(runner.Event{Kind: runner.KindApply, Key: key, ModulePath: mod.Path, Phase: runner.PhaseDone, Record: rec})
 }
 
 func TestUpstreamApplyInvalidatesMappedDownstream(t *testing.T) {

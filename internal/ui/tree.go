@@ -317,7 +317,7 @@ func (m *Model) renderWorkspaceStatus(ws *domain.Workspace) string {
 		return m.taskBadge(ts, "planning", "plan queued")
 	}
 	if ts := m.task(runner.KindApply, key); ts != nil {
-		return m.taskBadge(ts, "applying (tmux)", "apply queued")
+		return m.taskBadge(ts, "applying", "apply queued")
 	}
 	if ts := m.task(runner.KindOutput, key); ts != nil {
 		return m.taskBadge(ts, "fetching output", "output queued")
@@ -339,7 +339,7 @@ func (m *Model) renderWorkspaceStatus(ws *domain.Workspace) string {
 		a := rec.Apply
 		switch {
 		case a.Aborted:
-			parts = append(parts, styleError.Render("apply aborted"))
+			parts = append(parts, styleError.Render("apply interrupted"))
 		case a.ExitCode != nil && *a.ExitCode == 0:
 			parts = append(parts, styleGood.Render("applied "+humanDur(*a.Finished)))
 		case a.ExitCode != nil:
