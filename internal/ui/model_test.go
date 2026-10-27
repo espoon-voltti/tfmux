@@ -827,3 +827,21 @@ func TestRefreshRescansEditedPins(t *testing.T) {
 		t.Errorf("badge for the old pin should be gone:\n%s", v)
 	}
 }
+
+// An applied workspace shows only the apply; a plan whose file is gone
+// without an apply (TTL or discard) still says so.
+func TestStatusCellAfterApplyHidesExpiredPlan(t *testing.T) {
+	m, mod := fixtureModel(t)
+	enumerated(t, m, mod, "prod", "staging")
+	applied(m, mod, "prod")
+	m.runs[mod.Path+"//staging"] = &state.RunRecord{ModulePath: mod.Path, Workspace: "staging", PlanExitCode: tfexec.PlanChanges}
+	m.planFiles[mod.Path+"//staging"] = false
+	m.reflow()
+	v := m.View()
+	if strings.Count(v, "changes (plan expired)") != 1 {
+		t.Errorf("only staging's plan expired without an apply:\n%s", v)
+	}
+	if !strings.Contains(v, "applied ") {
+		t.Errorf("prod should show as applied:\n%s", v)
+	}
+}

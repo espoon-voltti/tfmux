@@ -327,6 +327,38 @@ func (m *Model) renderWorkspaceStatus(ws *domain.Workspace) string {
 		return styleDim.Render("never planned")
 	}
 	var parts []string
+	// After a successful apply the plan's verdict and age are history; the
+	// apply's own timestamp is the one that matters.
+	if !appliedOK(rec) {
+		parts = m.renderPlanVerdict(rec, key)
+	}
+	if rec.PlanExitCode != tfexec.PlanChanges && m.isStale(rec) {
+		parts = append(parts, styleStale.Render("needs plan"))
+	}
+	if rec.Apply != nil {
+		a := rec.Apply
+		switch {
+		case a.Aborted:
+			parts = append(parts, styleError.Render("apply aborted"))
+		case a.ExitCode != nil && *a.ExitCode == 0:
+			parts = append(parts, styleGood.Render("applied "+humanDur(*a.Finished)))
+		case a.ExitCode != nil:
+			parts = append(parts, styleError.Render(fmt.Sprintf("apply failed (%d)", *a.ExitCode)))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func appliedOK(rec *state.RunRecord) bool {
+	a := rec.Apply
+	return a != nil && !a.Aborted && a.ExitCode != nil && *a.ExitCode == 0
+}
+
+// renderPlanVerdict renders the last plan's outcome and age: error, clean,
+// or changes — with the saved plan's summary when its file is still on disk,
+// and a dim "expired" marker when it is gone without having been applied.
+func (m *Model) renderPlanVerdict(rec *state.RunRecord, key string) []string {
+	var parts []string
 	switch rec.PlanExitCode {
 	case tfexec.PlanError:
 		msg := "✗ plan error"
@@ -346,22 +378,7 @@ func (m *Model) renderWorkspaceStatus(ws *domain.Workspace) string {
 			parts = append(parts, styleDim.Render("changes (plan expired)"))
 		}
 	}
-	parts = append(parts, styleDim.Render(humanDur(rec.PlanFinished)))
-	if rec.PlanExitCode != tfexec.PlanChanges && m.isStale(rec) {
-		parts = append(parts, styleStale.Render("needs plan"))
-	}
-	if rec.Apply != nil {
-		a := rec.Apply
-		switch {
-		case a.Aborted:
-			parts = append(parts, styleError.Render("apply aborted"))
-		case a.ExitCode != nil && *a.ExitCode == 0:
-			parts = append(parts, styleGood.Render("applied "+humanDur(*a.Finished)))
-		case a.ExitCode != nil:
-			parts = append(parts, styleError.Render(fmt.Sprintf("apply failed (%d)", *a.ExitCode)))
-		}
-	}
-	return strings.Join(parts, " ")
+	return append(parts, styleDim.Render(humanDur(rec.PlanFinished)))
 }
 
 // reasons assesses a workspace from the model's run records, plan files and
