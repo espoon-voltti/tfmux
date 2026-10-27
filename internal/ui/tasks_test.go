@@ -62,6 +62,20 @@ func TestInterruptRunningApplyNeedsConfirm(t *testing.T) {
 	if !m.hasTask(runner.KindApply, key) {
 		t.Error("the apply must stay listed until the runner reports it stopped")
 	}
+
+	// The runner reports the interrupted apply as canceled with its record
+	// marked aborted; the pane must not file that as a harmless cancel.
+	m.updateRunnerEvent(runner.Event{
+		Kind: runner.KindApply, Key: key, ModulePath: mod.Path, Phase: runner.PhaseCanceled,
+		Record: &state.RunRecord{ModulePath: mod.Path, Workspace: "prod", Apply: &state.ApplyRecord{Aborted: true}},
+	})
+	done := m.done[runner.TaskID(runner.KindApply, key)]
+	if done == nil || done.outcome != "✗ interrupted" || !done.failed {
+		t.Errorf("done entry = %+v, want a failed \"✗ interrupted\" outcome", done)
+	}
+	if !strings.Contains(m.status, "interrupted") {
+		t.Errorf("status = %q", m.status)
+	}
 }
 
 // x on a tree row cancels plans but never a running apply: that takes the

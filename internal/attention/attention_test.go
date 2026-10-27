@@ -85,3 +85,36 @@ func TestModuleBehind(t *testing.T) {
 		t.Error("nil deps should yield nothing")
 	}
 }
+
+func TestApplyBlocker(t *testing.T) {
+	const fp = "tree|dirty"
+	changes := func(apply *state.ApplyRecord) *state.RunRecord {
+		return &state.RunRecord{PlanExitCode: tfexec.PlanChanges, Fingerprint: fp, Apply: apply}
+	}
+	cases := []struct {
+		name         string
+		rec          *state.RunRecord
+		planFile     bool
+		planRunning  bool
+		applyRunning bool
+		current      string
+		want         string
+	}{
+		{"ready", changes(nil), true, false, false, fp, ""},
+		{"plan running", changes(nil), true, true, false, fp, "plan still running"},
+		{"never planned", nil, false, false, false, fp, "nothing to apply — run a plan with changes first"},
+		{"clean plan", &state.RunRecord{PlanExitCode: tfexec.PlanClean, Fingerprint: fp}, false, false, false, fp, "nothing to apply — run a plan with changes first"},
+		{"plan file gone", changes(nil), false, false, false, fp, "plan file expired or discarded — re-plan first"},
+		{"apply in flight", changes(nil), true, false, true, fp, "apply already queued/running — enter follows its log"},
+		{"apply interrupted", changes(&state.ApplyRecord{Aborted: true}), true, false, false, fp, "last apply was interrupted — state unknown, re-plan first"},
+		{"apply failed before touching state", changes(&state.ApplyRecord{ExitCode: intp(1)}), true, false, false, fp, ""},
+		{"stale", changes(nil), true, false, false, "other|x", "plan is STALE (module or upstream state changed since plan) — re-plan first"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ApplyBlocker(c.rec, c.planFile, c.planRunning, c.applyRunning, c.current); got != c.want {
+				t.Errorf("ApplyBlocker = %q, want %q", got, c.want)
+			}
+		})
+	}
+}

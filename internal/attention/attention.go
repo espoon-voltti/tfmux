@@ -137,7 +137,8 @@ func Module(d *domain.Deps, behind map[string]deps.Behind) []Reason {
 
 // ApplyBlocker reports why a workspace's saved plan can't be applied right
 // now, or "" when it can: a plan with outstanding changes, its file on disk,
-// nothing in flight for the workspace, and not stale.
+// nothing in flight for the workspace, no interrupted apply of it, and not
+// stale.
 func ApplyBlocker(rec *state.RunRecord, planFile, planRunning, applyRunning bool, fingerprint string) string {
 	switch {
 	case planRunning:
@@ -147,9 +148,11 @@ func ApplyBlocker(rec *state.RunRecord, planFile, planRunning, applyRunning bool
 	case !planFile:
 		return "plan file expired or discarded — re-plan first"
 	case applyRunning:
-		return "apply already queued/running — press enter to attach"
+		return "apply already queued/running — enter follows its log"
+	case rec.Apply != nil && rec.Apply.Aborted:
+		return "last apply was interrupted — state unknown, re-plan first"
 	case Stale(Assess(rec, planFile, fingerprint)):
-		return "plan is STALE (module or upstream state changed since plan) — re-plan, or attach and apply manually"
+		return "plan is STALE (module or upstream state changed since plan) — re-plan first"
 	}
 	return ""
 }

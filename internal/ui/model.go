@@ -603,6 +603,8 @@ func (m *Model) markDone(ts *taskState, outcome string, failed bool) {
 // taskOutcome labels a terminal event for the task pane.
 func taskOutcome(ev runner.Event) (label string, failed bool) {
 	switch {
+	case ev.Phase == runner.PhaseCanceled && ev.Record != nil && ev.Record.Apply != nil && ev.Record.Apply.Aborted:
+		return "✗ interrupted", true
 	case ev.Phase == runner.PhaseCanceled:
 		return "canceled", false
 	case ev.Phase == runner.PhaseFailed:

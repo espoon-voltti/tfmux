@@ -165,3 +165,20 @@ func TestShutdownInterruptsRunningTasks(t *testing.T) {
 		t.Error("queued task survived shutdown")
 	}
 }
+
+// After Shutdown the runner accepts nothing: a task enqueued by a straggling
+// caller, or the init a task deferred to while being interrupted, would
+// outlive the exit.
+func TestShutdownRefusesLaterWork(t *testing.T) {
+	f := newFixture(t, 2)
+	m := f.newModule(t, "mod1")
+	if n := f.runner.Shutdown(time.Second); n != 0 {
+		t.Fatalf("%d task(s) running in an idle runner", n)
+	}
+	if f.runner.EnqueuePlan(&domain.Workspace{Module: m, Name: "prod"}) {
+		t.Error("enqueue accepted after shutdown")
+	}
+	if f.runner.Running(m.Path + "//prod") {
+		t.Error("a task is in flight after shutdown")
+	}
+}

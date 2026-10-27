@@ -207,6 +207,7 @@ type Runner struct {
 	inflight    map[string]*task // id -> task (queued or running)
 	ready       []*task
 	seq         int
+	closed      bool // Shutdown has begun: nothing is enqueued or dispatched any more
 
 	// Decoupled emission: callers (including the UI thread via Cancel) never
 	// block on the Events channel, even when a burst of events outruns the UI.
@@ -263,7 +264,7 @@ func (r *Runner) schedule() {
 // pickLocked returns the highest-priority ready task whose module is free, or
 // nil if none can run right now. The chosen task is removed from the queue.
 func (r *Runner) pickLocked() *task {
-	if r.active >= r.parallelism {
+	if r.closed || r.active >= r.parallelism {
 		return nil
 	}
 	best, bi := -1, -1
@@ -319,6 +320,11 @@ func (r *Runner) execute(t *task) {
 	}
 	delete(r.busyModule, t.modulePath)
 	var dependents []*task
+	if out.deferral != nil && r.closed {
+		// The init it would queue could never run; the task ends as if it
+		// had been dropped from the queue.
+		out = Event{Phase: PhaseCanceled}
+	}
 	if out.deferral != nil {
 		// Readied and the init queued under the same lock that frees the
 		// module, so the scheduler can't slip another task into the module
@@ -434,6 +440,9 @@ func (r *Runner) enqueue(kind Kind, key, modulePath, wantWS string, job jobFunc)
 }
 
 func (r *Runner) enqueueLocked(kind Kind, key, modulePath, wantWS string, job jobFunc) bool {
+	if r.closed {
+		return false
+	}
 	id := TaskID(kind, key)
 	if _, ok := r.inflight[id]; ok {
 		return false
@@ -507,9 +516,12 @@ func (r *Runner) Running(key string) bool {
 // Shutdown drops every queued task, interrupts every running one and waits
 // up to timeout for them to stop. It returns how many were still running
 // when it gave up. No events are emitted for the dropped queue: the caller
-// is exiting.
+// is exiting. The runner accepts and dispatches nothing afterwards, so a
+// task that defers to init while it is being interrupted ends canceled
+// rather than queueing a fresh init that nobody would wait for.
 func (r *Runner) Shutdown(timeout time.Duration) int {
 	r.mu.Lock()
+	r.closed = true
 	for id, t := range r.inflight {
 		if t.started {
 			t.cancel()
@@ -517,6 +529,7 @@ func (r *Runner) Shutdown(timeout time.Duration) int {
 		}
 		r.removeReadyLocked(t)
 		delete(r.inflight, id)
+		t.cancel()
 	}
 	r.mu.Unlock()
 	deadline := time.Now().Add(timeout)
